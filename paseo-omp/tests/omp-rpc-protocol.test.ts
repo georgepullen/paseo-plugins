@@ -763,6 +763,40 @@ describe("OMP RPC transport", () => {
     await session.close();
   });
 
+  test("drops an over-budget nonterminal agent_end message list without failing", async () => {
+    const child = new FakeRpcChild();
+    observeCommands(child, (command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          command: "negotiate_protocol",
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+      }
+    });
+    const opening = runtimeFor(child).startSession({ cwd: "/repo", mode: "full" });
+    child.write(READY_FRAME);
+    const session = await opening;
+    const received: OmpRpcEvent[] = [];
+    session.onEvent((event) => received.push(event));
+    // A long run whose queued steer keeps it going: small in bytes, large in JSON nodes.
+    const messages = Array.from({ length: 200 }, () => ({
+      role: "assistant",
+      content: Array.from({ length: 8 }, () => ({ type: "text", text: "step" })),
+      stopReason: "toolUse",
+    }));
+    child.write({ type: "agent_end", messages, isTerminal: false });
+    child.write({ type: "agent_start" });
+    await Promise.resolve();
+    expect(received).toEqual([
+      { type: "agent_end", isTerminal: false, messageCount: 200 },
+      { type: "agent_start" },
+    ]);
+    await session.close();
+  });
+
   test("accepts current goal retry compaction and subagent events", async () => {
     const child = new FakeRpcChild();
     observeCommands(child, (command) => {

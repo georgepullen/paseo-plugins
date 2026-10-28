@@ -1,12 +1,18 @@
 import { describe, expect, onTestFinished, test } from "vitest";
+import { OmpRpcRuntime } from "../server/provider/omp-rpc";
 import type { OmpMessage } from "../server/provider/omp-rpc-protocol";
+import { createOmpProvider } from "../server/provider/registration";
 import {
   createHarness,
+  EventLog,
   establishTerminalOwnership,
   finishTurn,
+  MODEL,
   openSession,
+  ProviderRpcChild,
   sessionAt,
   startPrompt,
+  TEST_RUNTIME_ENV,
   turnIdFrom,
 } from "./helpers/provider-harness";
 
@@ -688,6 +694,108 @@ describe("OMP direct provider", () => {
         }),
       }),
     );
+    await connection.close();
+  });
+
+  test("keeps the runtime when a long run continues after an over-budget agent_end", async () => {
+    let spawns = 0;
+    let child: ProviderRpcChild;
+    child = new ProviderRpcChild((command) => {
+      if (command.type === "negotiate_protocol") {
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          data: { protocolVersion: 2 },
+        });
+      } else if (command.type === "get_state") {
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          data: {
+            model: MODEL,
+            thinkingLevel: "medium",
+            isStreaming: false,
+            isCompacting: false,
+            sessionId: "native-long-run",
+          },
+        });
+      } else if (command.type === "get_available_models") {
+        child.write({ type: "response", id: command.id, success: true, data: { models: [MODEL] } });
+      } else if (command.type === "get_available_commands") {
+        child.write({ type: "response", id: command.id, success: true, data: { commands: [] } });
+      } else if (command.type === "prompt") {
+        child.write({
+          type: "response",
+          id: command.id,
+          success: true,
+          data: { agentInvoked: true },
+        });
+      }
+    });
+    const runtime = new OmpRpcRuntime({
+      spawnProcess: () => {
+        spawns += 1;
+        return child.asChildProcess();
+      },
+      terminateProcessTree: () => Promise.resolve(true),
+      environment: TEST_RUNTIME_ENV,
+    });
+    const connection = await createOmpProvider({ runtime, environment: TEST_RUNTIME_ENV }).connect({
+      versions: [1],
+      capabilities: ["prompt.message"],
+    });
+    const events = new EventLog();
+    connection.onEvent((event) => events.push(event));
+    queueMicrotask(() =>
+      child.write({
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+        maxFrameBytes: 1_048_576,
+        maxReassembledFrameBytes: 67_108_864,
+      }),
+    );
+    await connection.send({
+      type: "session.open",
+      requestId: "long-run-open",
+      sessionId: "session-1",
+      config: {
+        cwd: "/repo",
+        env: {},
+        mcpServers: {},
+        mode: "full",
+        settings: {},
+        persist: false,
+      },
+      history: "skip",
+    });
+    await events.waitFor(
+      (event) => event.type === "session.ready" && event.requestId === "long-run-open",
+    );
+    const turnId = turnIdFrom(await startPrompt(connection, events, "long-run", "work"));
+    // OMP ends the run as nonterminal when a rejected steer is still queued, then continues it.
+    const messages = Array.from({ length: 200 }, () => ({
+      role: "assistant",
+      content: Array.from({ length: 8 }, () => ({ type: "text", text: "step" })),
+      stopReason: "toolUse",
+    }));
+    child.write({ type: "agent_end", messages, isTerminal: false });
+    child.write({ type: "agent_start" });
+    child.write({
+      type: "message_end",
+      message: { role: "assistant", content: "done", stopReason: "stop" },
+    });
+    child.write({ type: "agent_end", messages: [], isTerminal: true });
+
+    expect(
+      await events.waitFor(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
+      ),
+    ).toEqual(expect.objectContaining({ state: "completed" }));
+    expect(spawns).toBe(1);
     await connection.close();
   });
 });

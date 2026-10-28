@@ -1003,7 +1003,12 @@ export class OmpRpcProcess {
         4_096,
       ) !== Number.POSITIVE_INFINITY;
     if (onlyUnsafePayload && payloadIsSafe) return false;
-    if (envelope.data.isTerminal === false) {
+    // Nonterminal messages are never read, so an over-budget list is dropped like a terminal one.
+    if (
+      envelope.data.isTerminal === false &&
+      frame.messages !== undefined &&
+      !Array.isArray(frame.messages)
+    ) {
       this.fail(new Error("OMP emitted an invalid nonterminal agent_end payload"));
       return true;
     }
