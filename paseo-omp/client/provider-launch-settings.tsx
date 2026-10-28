@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import {
+  MAX_SESSIONS_UPPER_BOUND,
   providerLaunchSettings,
   providerLaunchSettingsSchema,
 } from "../shared/provider-launch-settings";
@@ -23,6 +24,11 @@ function ProviderLaunchSettingsControls({ settings }: { settings: ReadySettings 
   useEffect(() => {
     setRawNames(savedNames);
   }, [savedNames]);
+  const savedMaxSessions = String(settings.values.maxSessions);
+  const [rawMaxSessions, setRawMaxSessions] = useState(() => savedMaxSessions);
+  useEffect(() => {
+    setRawMaxSessions(savedMaxSessions);
+  }, [savedMaxSessions]);
   const inheritEnv = [
     ...new Set(
       rawNames
@@ -31,7 +37,7 @@ function ProviderLaunchSettingsControls({ settings }: { settings: ReadySettings 
         .filter(Boolean),
     ),
   ];
-  const next = providerLaunchSettingsSchema.safeParse({ inheritEnv });
+  const next = providerLaunchSettingsSchema.safeParse({ ...settings.values, inheritEnv });
   const error = next.success
     ? null
     : (next.error.issues[0]?.message ?? "Enter valid variable names.");
@@ -39,6 +45,14 @@ function ProviderLaunchSettingsControls({ settings }: { settings: ReadySettings 
     if (!next.success) return;
     await settings.save(next.data, settings.revision);
   }, [next, settings]);
+  const nextMaxSessions = providerLaunchSettingsSchema.safeParse({
+    ...settings.values,
+    maxSessions: Number(rawMaxSessions.trim()),
+  });
+  const saveMaxSessions = useCallback(async () => {
+    if (!nextMaxSessions.success) return;
+    await settings.save(nextMaxSessions.data, settings.revision);
+  }, [nextMaxSessions, settings]);
 
   return (
     <View style={{ gap: 12 }}>
@@ -69,7 +83,9 @@ function ProviderLaunchSettingsControls({ settings }: { settings: ReadySettings 
             actionLabel="Clear"
             disabled={settings.saving || settings.values.inheritEnv.length === 0}
             onPress={async () => {
-              if (await settings.save({ inheritEnv: [] }, settings.revision)) setRawNames("");
+              if (await settings.save({ ...settings.values, inheritEnv: [] }, settings.revision)) {
+                setRawNames("");
+              }
             }}
           />
           {settings.saveError ? (
@@ -81,6 +97,34 @@ function ProviderLaunchSettingsControls({ settings }: { settings: ReadySettings 
               onPress={settings.reload}
             />
           ) : null}
+        </SettingsCard>
+      </SettingsSection>
+      <SettingsSection
+        title="Session limit"
+        info="Applies to all OMP Plugin agents on this host together, including idle ones."
+      >
+        <SettingsCard>
+          <SettingsInput
+            key={savedMaxSessions}
+            label="Open sessions"
+            hint="New OMP Plugin agents are refused while this many sessions are open. Archive idle agents to free sessions."
+            initialValue={savedMaxSessions}
+            onChangeText={setRawMaxSessions}
+            error={
+              nextMaxSessions.success
+                ? undefined
+                : `Enter a whole number from 1 to ${MAX_SESSIONS_UPPER_BOUND}.`
+            }
+            disabled={settings.saving}
+          />
+          <SettingsAction
+            label="Save session limit"
+            actionLabel="Save"
+            disabled={
+              settings.saving || rawMaxSessions === savedMaxSessions || !nextMaxSessions.success
+            }
+            onPress={() => void saveMaxSessions()}
+          />
         </SettingsCard>
       </SettingsSection>
     </View>

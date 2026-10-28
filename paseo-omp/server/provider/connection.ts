@@ -34,6 +34,7 @@ import {
 } from "./security";
 import { type OmpOpenedSession, OmpProviderSession, ompPersistenceSessionId } from "./session";
 import { OmpHistorySession } from "./session-history";
+import { OmpSessionLimit } from "./session-limit";
 import { isOmpHistoryOnlyOpen } from "./session-purpose";
 
 type ProviderConfigurationCompat = {
@@ -69,7 +70,6 @@ const SUPPORTED_INPUTS: Readonly<Record<string, true>> = {
   "session.can_stop_runtime": true,
   "session.close": true,
 };
-const MAX_CONNECTION_SESSIONS = 32;
 const MAX_ACTIVE_OPERATIONS = 128;
 const MAX_PROVIDER_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_NESTED_OPTION_BYTES = 256 * 1024;
@@ -723,6 +723,7 @@ export function createOmpConnection(
     console.error("OMP provider failure", diagnostic),
   reportOperationalFailure: OmpOperationalFailureReporter = () => {},
   resolveHostInheritEnv?: () => Promise<readonly string[]>,
+  sessionLimit = new OmpSessionLimit(),
 ): ProviderConnection {
   const errorDetails = (error: unknown, fallback: string): { message: string } => {
     if (isOmpPublicError(error)) return { message: error.message };
@@ -767,6 +768,9 @@ export function createOmpConnection(
     string,
     { token: symbol; nativeSessionId?: string; cleanup?: Promise<void> }
   >();
+  const untrackSessions = sessionLimit.track(
+    () => sessions.size + opening.size + failedCleanup.size,
+  );
   const shutdown = new AbortController();
   let catalogCleanup: Promise<void> | null = null;
   const activeOperations = new Set<Promise<void>>();
@@ -906,8 +910,13 @@ export function createOmpConnection(
           requestFailure(input.requestId, new OmpPublicError("OMP session already exists"));
           return;
         }
-        if (sessions.size + opening.size + failedCleanup.size >= MAX_CONNECTION_SESSIONS) {
-          requestFailure(input.requestId, new OmpPublicError("OMP session limit reached"));
+        if (sessionLimit.openSessions >= sessionLimit.maxSessions) {
+          requestFailure(
+            input.requestId,
+            new OmpPublicError(
+              `OMP session limit reached (${sessionLimit.maxSessions} open sessions). Archive idle agents or raise the session limit in OMP → Plugin.`,
+            ),
+          );
           return;
         }
         const token = Symbol(input.sessionId);
@@ -1313,7 +1322,7 @@ export function createOmpConnection(
       return () => listeners.delete(listener);
     },
     close() {
-      closePromise ??= Promise.resolve().then(disposeConnection);
+      closePromise ??= Promise.resolve().then(disposeConnection).finally(untrackSessions);
       return closePromise;
     },
   };

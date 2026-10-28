@@ -25,6 +25,7 @@ import {
 } from "./server/provider/profile-providers";
 import { createOmpProvider } from "./server/provider/registration";
 import { OmpPublicError } from "./server/provider/security";
+import { OmpSessionLimit } from "./server/provider/session-limit";
 import { resolveGetOmpProviderHealth } from "./server/provider-diagnostics";
 import { resolveListOmpQuotas } from "./server/quota";
 import { resolveListOmpSessions } from "./server/sessions";
@@ -62,6 +63,11 @@ export default function contribute(server: PluginServerContext) {
     throw new OmpPublicError("OMP host launch settings are unavailable");
   };
   const browserAuthorizationRegistry = new OmpBrowserAuthorizationRegistry();
+  const sessionLimit = new OmpSessionLimit(async () => {
+    const current = await launchSettings.read();
+    return current.status === "ready" ? current.values.maxSessions : undefined;
+  });
+  const removeSessionLimitListener = launchSettings.subscribe(() => sessionLimit.refresh());
   const protocolViolations = new OmpProtocolViolationCollector();
   const operationalFailures = new OmpOperationalFailureCollector();
   const profiles = discoverOmpProfilesSync();
@@ -70,6 +76,7 @@ export default function contribute(server: PluginServerContext) {
     server.registerProvider(
       createProfileOmpProvider(profile, {
         browserAuthorizationRegistry,
+        sessionLimit,
         reportProtocolViolation: protocolViolations.report,
         reportOperationalFailure: operationalFailures.report,
         resolveHostInheritEnv,
@@ -104,6 +111,7 @@ export default function contribute(server: PluginServerContext) {
   server.registerProvider(
     createOmpProvider({
       browserAuthorizationRegistry,
+      sessionLimit,
       reportProtocolViolation: protocolViolations.report,
       reportOperationalFailure: operationalFailures.report,
       resolveHostInheritEnv,
@@ -111,6 +119,7 @@ export default function contribute(server: PluginServerContext) {
   );
   return () => {
     browserAuthorizationRegistry.clear();
+    removeSessionLimitListener();
     removeSessionOpenHook();
   };
 }

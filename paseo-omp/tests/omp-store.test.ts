@@ -178,7 +178,7 @@ test("registered RPC handlers carry store selection across asynchronous resolver
       handlers.set(contract.name, handler);
     },
     before: () => () => {},
-    registerSettings: () => {},
+    registerSettings: () => ({ subscribe: () => () => {} }),
     registerProvider: () => {},
   } as unknown as PluginServerContext);
   expect(typeof cleanup).toBe("function");
