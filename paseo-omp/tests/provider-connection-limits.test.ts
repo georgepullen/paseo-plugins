@@ -611,7 +611,14 @@ describe("OMP direct provider", () => {
           event.turnId === recoverableTurn &&
           event.state !== "started",
       ),
-    ).toEqual([expect.objectContaining({ state: "failed" })]);
+    ).toEqual([
+      expect.objectContaining({
+        state: "failed",
+        error: {
+          message: "OMP runtime failed: OMP emitted an invalid nonterminal agent_end payload",
+        },
+      }),
+    ]);
 
     const finalTurn = turnIdFrom(
       await startPrompt(connection, events, "after-invalid-nonterminal", "continue"),
