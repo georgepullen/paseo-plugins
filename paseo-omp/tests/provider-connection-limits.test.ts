@@ -14,6 +14,7 @@ import {
   FakeOmpRuntime,
   finishTurn,
   MODEL,
+  NATIVE_SESSION_ID,
   openSession,
   ProviderRpcChild,
   sessionAt,
@@ -181,6 +182,45 @@ describe("OMP direct provider", () => {
     expect(await openOutcome(second, events, "freed")).toEqual(
       expect.objectContaining({ type: "session.ready" }),
     );
+    await second.close();
+  });
+  test("counts a session once while its replay keeps it opening", async () => {
+    const runtime = new FakeOmpRuntime();
+    runtime.descriptors.push({ id: NATIVE_SESSION_ID, cwd: "/repo" });
+    const historyStarted = Promise.withResolvers<void>();
+    runtime.nextHistoryObserved = historyStarted.resolve;
+    runtime.nextHistoryGate = Promise.withResolvers<void>().promise;
+    const sessionLimit = new OmpSessionLimit(async () => 2);
+    const provider = createOmpProvider({ runtime, environment: TEST_RUNTIME_ENV, sessionLimit });
+    const first = await provider.connect({
+      versions: [1],
+      capabilities: ["prompt.message", "session.persistence"],
+    });
+    const second = await provider.connect({ versions: [1], capabilities: ["prompt.message"] });
+    const events = new EventLog();
+    first.onEvent((event) => events.push(event));
+    second.onEvent((event) => events.push(event));
+
+    await first.send({
+      type: "session.open",
+      requestId: "open-replaying",
+      sessionId: "replaying",
+      config: { cwd: "/repo", env: {}, mcpServers: {}, mode: "full", settings: {}, persist: true },
+      persistence: { version: 1, data: { sessionId: NATIVE_SESSION_ID } },
+      history: "replay",
+    });
+    await historyStarted.promise;
+
+    expect(await openOutcome(second, events, "alongside")).toEqual(
+      expect.objectContaining({ type: "session.ready" }),
+    );
+    expect(await openOutcome(second, events, "over")).toEqual(
+      expect.objectContaining({
+        type: "request.failed",
+        error: { message: sessionLimitReached(2) },
+      }),
+    );
+    await first.close();
     await second.close();
   });
   test("bounds connection-wide active operations before dispatch", async () => {

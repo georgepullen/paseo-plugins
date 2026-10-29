@@ -768,10 +768,13 @@ export function createOmpConnection(
     string,
     { token: symbol; nativeSessionId?: string; cleanup?: Promise<void> }
   >();
-  // After a failed close, only sessions whose cleanup is still unresolved stay counted.
-  const untrackSessions = sessionLimit.track(
-    () => (closed ? 0 : sessions.size + opening.size) + failedCleanup.size,
-  );
+  // One session id is held by `sessions`, `opening` and `failedCleanup` at different moments, and
+  // by two of them at once while it opens or fails. After a failed close only unresolved cleanup
+  // stays counted, until it drains.
+  const untrackSessions = sessionLimit.track(() => {
+    if (closed) return failedCleanup.size;
+    return new Set([...sessions.keys(), ...opening.keys(), ...failedCleanup.keys()]).size;
+  });
   const shutdown = new AbortController();
   let catalogCleanup: Promise<void> | null = null;
   const activeOperations = new Set<Promise<void>>();
@@ -814,7 +817,9 @@ export function createOmpConnection(
       ...(quarantinedNativeSessionId ? { nativeSessionId: quarantinedNativeSessionId } : {}),
     });
     nativeReservations.quarantine(quarantinedNativeSessionId, token, cleanup, () => {
-      if (failedCleanup.get(sessionId)?.token === token) failedCleanup.delete(sessionId);
+      if (failedCleanup.get(sessionId)?.token !== token) return;
+      failedCleanup.delete(sessionId);
+      if (closed && failedCleanup.size === 0) untrackSessions();
     });
   };
 
@@ -1323,7 +1328,12 @@ export function createOmpConnection(
       return () => listeners.delete(listener);
     },
     close() {
-      closePromise ??= Promise.resolve().then(disposeConnection).then(untrackSessions);
+      closePromise ??= Promise.resolve()
+        .then(disposeConnection)
+        .then(untrackSessions, (error: unknown) => {
+          if (failedCleanup.size === 0) untrackSessions();
+          throw error;
+        });
       return closePromise;
     },
   };
