@@ -768,8 +768,9 @@ export function createOmpConnection(
     string,
     { token: symbol; nativeSessionId?: string; cleanup?: Promise<void> }
   >();
+  // After a failed close, only sessions whose cleanup is still unresolved stay counted.
   const untrackSessions = sessionLimit.track(
-    () => sessions.size + opening.size + failedCleanup.size,
+    () => (closed ? 0 : sessions.size + opening.size) + failedCleanup.size,
   );
   const shutdown = new AbortController();
   let catalogCleanup: Promise<void> | null = null;
@@ -1322,7 +1323,7 @@ export function createOmpConnection(
       return () => listeners.delete(listener);
     },
     close() {
-      closePromise ??= Promise.resolve().then(disposeConnection).finally(untrackSessions);
+      closePromise ??= Promise.resolve().then(disposeConnection).then(untrackSessions);
       return closePromise;
     },
   };

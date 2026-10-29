@@ -2,10 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderConnection } from "@getpaseo/plugin/server/provider";
-import { describe, expect, onTestFinished, test } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { OmpBrowserAuthorizationRegistry } from "../server/mcp-browser";
 import { OmpRpcRuntime } from "../server/provider/omp-rpc";
 import { createOmpProvider } from "../server/provider/registration";
+import { OmpCleanupFailure } from "../server/provider/security";
 import { OmpSessionLimit } from "../server/provider/session-limit";
 import {
   createHarness,
@@ -149,6 +150,37 @@ describe("OMP direct provider", () => {
 
     await first.close();
     expect(await openOutcome(second, events, "second-e")).toEqual(ready);
+    await second.close();
+  });
+  test("keeps a session with unresolved cleanup counted after its connection closes", async () => {
+    const runtime = new FakeOmpRuntime();
+    const cleanup = Promise.withResolvers<void>();
+    runtime.nextCloseError = new OmpCleanupFailure("cleanup pending", cleanup.promise);
+    const sessionLimit = new OmpSessionLimit(async () => 1);
+    const provider = createOmpProvider({ runtime, environment: TEST_RUNTIME_ENV, sessionLimit });
+    const request = { versions: [1], capabilities: ["prompt.message"] };
+    const first = await provider.connect(request);
+    const second = await provider.connect(request);
+    const events = new EventLog();
+    first.onEvent((event) => events.push(event));
+    second.onEvent((event) => events.push(event));
+
+    expect(await openOutcome(first, events, "stuck")).toEqual(
+      expect.objectContaining({ type: "session.ready" }),
+    );
+    await expect(first.close()).rejects.toThrow("provider connection cleanup failed");
+    expect(await openOutcome(second, events, "blocked")).toEqual(
+      expect.objectContaining({
+        type: "request.failed",
+        error: { message: sessionLimitReached(1) },
+      }),
+    );
+
+    cleanup.resolve();
+    await vi.waitFor(() => expect(sessionLimit.openSessions).toBe(0));
+    expect(await openOutcome(second, events, "freed")).toEqual(
+      expect.objectContaining({ type: "session.ready" }),
+    );
     await second.close();
   });
   test("bounds connection-wide active operations before dispatch", async () => {
