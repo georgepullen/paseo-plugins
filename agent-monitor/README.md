@@ -33,9 +33,12 @@ screenshot uses the same synthetic project and agent names.
 
 - Counts and filters by triage bucket: Attention, Running, Idle, Closed. Attention covers
   `requiresAttention`, `status === "error"`, and pending permission requests.
-- Default layout groups agents by **project**, then by workspace under each project. Open the
-  gear beside Refresh for the host-native Monitor settings screen, which can switch to workspace
-  groups or a flat compact list.
+- Grouping and sort are separate. The **Group** row switches the roster between **Project**,
+  **Workspace**, **Host**, **Type** and **None** (flat), and the **Sort** row orders rows inside
+  every group: **Triage**, **Recent** or **A-Z**. Each chip carries its key: `P`/`W`/`H`/`Y`/`N`
+  group, `S`/`E`/`Z` sort. Host and Type groups collapse and expand like project headers. Choices
+  save in the host settings. Open the gear beside Refresh for the host-native Monitor settings
+  screen, which exposes the same grouping and sort (plus the rest of the display options).
 - Settings also control float-pinned sorting, agent sort (triage / recently updated / title),
   collapse of matching workspace headers, density, default bucket, whether Closed stays out of
   All, and display toggles for diffs, pin markers, model, wait age, subagent counts, last error, and

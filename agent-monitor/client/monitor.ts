@@ -95,10 +95,19 @@ export type ProjectGroup = {
   workspaces: WorkspaceGroup[];
 };
 
+/** A plain group the roster renders with one header: a host or an agent provider. */
+export type NamedGroup = {
+  id: string;
+  name: string;
+  entries: AgentEntry[];
+};
+
 export type Roster =
   | { kind: "compact"; entries: AgentEntry[] }
   | { kind: "workspace"; groups: WorkspaceGroup[] }
-  | { kind: "project"; projects: ProjectGroup[] };
+  | { kind: "project"; projects: ProjectGroup[] }
+  | { kind: "host"; groups: NamedGroup[] }
+  | { kind: "provider"; groups: NamedGroup[] };
 
 export const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
 export const PARENT_SERVER_ID_LABEL = "paseo.parent-server-id";
@@ -465,6 +474,67 @@ function sortProjects(projects: ProjectGroup[], options: SortOptions): void {
   });
 }
 
+/** Sorts groups the way the roster sorts workspaces: latest activity, name, or best bucket. */
+function sortNamedGroups(groups: NamedGroup[], options: SortOptions): void {
+  groups.sort((left, right) => {
+    if (options.agentSort === "title") return left.name.localeCompare(right.name);
+    if (options.agentSort === "updated") {
+      const leftUpdated = Math.max(
+        0,
+        ...left.entries.map((entry) => Date.parse(entry.agent.updatedAt)),
+      );
+      const rightUpdated = Math.max(
+        0,
+        ...right.entries.map((entry) => Date.parse(entry.agent.updatedAt)),
+      );
+      if (leftUpdated !== rightUpdated) return rightUpdated - leftUpdated;
+    } else {
+      const byBucket = bestBucket(left.entries) - bestBucket(right.entries);
+      if (byBucket !== 0) return byBucket;
+    }
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function namedGroups(
+  entries: readonly AgentEntry[],
+  options: GroupOptions,
+  keyOf: (entry: AgentEntry) => { id: string; name: string },
+): NamedGroup[] {
+  const groups = new Map<string, NamedGroup>();
+  for (const entry of entries) {
+    const { id, name } = keyOf(entry);
+    const group = groups.get(id);
+    if (group) group.entries.push(entry);
+    else groups.set(id, { id, name, entries: [entry] });
+  }
+  const result = [...groups.values()];
+  for (const group of result) sortEntries(group.entries, options.agentSort, options.hostId);
+  sortNamedGroups(result, options);
+  return result;
+}
+
+/** Groups agents by the daemon they run on. Unscoped entries fall under the monitored host. */
+export function groupByHost(entries: readonly AgentEntry[], options: GroupOptions): NamedGroup[] {
+  return namedGroups(entries, options, (entry) => {
+    const scope = hostOf(entry);
+    return scope
+      ? { id: scope.serverId, name: scope.label }
+      : { id: options.hostId, name: options.hostId };
+  });
+}
+
+/** Groups agents by provider, so one row per agent type reads at a glance. */
+export function groupByProvider(
+  entries: readonly AgentEntry[],
+  options: GroupOptions,
+): NamedGroup[] {
+  return namedGroups(entries, options, (entry) => ({
+    id: entry.agent.provider,
+    name: entry.agent.provider,
+  }));
+}
+
 export function buildRoster(
   entries: readonly AgentEntry[],
   directory: MonitorDirectory,
@@ -492,6 +562,12 @@ export function buildRoster(
   }
   if (settings.grouping === "workspace") {
     return { kind: "workspace", groups: groupByWorkspace(entries, directory, options) };
+  }
+  if (settings.grouping === "host") {
+    return { kind: "host", groups: groupByHost(entries, options) };
+  }
+  if (settings.grouping === "provider") {
+    return { kind: "provider", groups: groupByProvider(entries, options) };
   }
   return { kind: "project", projects: groupByProject(entries, directory, options) };
 }

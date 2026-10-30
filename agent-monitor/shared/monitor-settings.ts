@@ -1,7 +1,7 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
-export type GroupingMode = "compact" | "workspace" | "project";
+export type GroupingMode = "compact" | "workspace" | "project" | "host" | "provider";
 export type AgentSort = "triage" | "updated" | "title";
 export type Density = "comfortable" | "compact";
 export type DefaultBucket = "all" | "attention" | "running" | "idle" | "closed";
@@ -43,7 +43,9 @@ export const DEFAULT_SETTINGS: MonitorSettings = {
 };
 
 export const monitorSettingsSchema = z.object({
-  grouping: z.enum(["compact", "workspace", "project"]).default(DEFAULT_SETTINGS.grouping),
+  grouping: z
+    .enum(["compact", "workspace", "project", "host", "provider"])
+    .default(DEFAULT_SETTINGS.grouping),
   floatPinned: z.boolean().default(DEFAULT_SETTINGS.floatPinned),
   agentSort: z.enum(["triage", "updated", "title"]).default(DEFAULT_SETTINGS.agentSort),
   collapseMatchingWorkspace: z.boolean().default(DEFAULT_SETTINGS.collapseMatchingWorkspace),
@@ -73,6 +75,8 @@ export const GROUPING_OPTIONS: readonly { id: GroupingMode; label: string; hint:
   { id: "compact", label: "Compact", hint: "Flat agent list, original triage feel" },
   { id: "workspace", label: "Workspace", hint: "Group by workspace" },
   { id: "project", label: "Project", hint: "Project → workspace hierarchy" },
+  { id: "host", label: "Host", hint: "Group by the daemon each agent runs on" },
+  { id: "provider", label: "Type", hint: "Group by agent provider" },
 ];
 
 export const SORT_OPTIONS: readonly { id: AgentSort; label: string }[] = [

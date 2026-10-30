@@ -9,7 +9,9 @@ import {
   childCounts,
   delegatedFromServerId,
   type GroupOptions,
+  groupByHost,
   groupByProject,
+  groupByProvider,
   indexProjects,
   type MonitorDirectory,
   matches,
@@ -650,5 +652,65 @@ describe("attention summary", () => {
     expect(parseBucketParam("all")).toBeNull();
     expect(parseBucketParam("bogus")).toBeUndefined();
     expect(parseBucketParam(undefined)).toBeUndefined();
+  });
+});
+
+describe("roster orders", () => {
+  const alpha = { serverId: "srv-a", label: "alpha" };
+  const beta = { serverId: "srv-b", label: "beta" };
+  const withHost = (item: AgentEntry, host: typeof alpha) =>
+    ({ ...item, hostScope: host }) as AgentEntry;
+
+  test("groups by host and keeps the host label", () => {
+    const groups = groupByHost(
+      [
+        withHost(entry({ id: "a1" }), alpha),
+        withHost(entry({ id: "b1", title: "Beta one" }), beta),
+        withHost(entry({ id: "a2", title: "Alpha two" }), alpha),
+      ],
+      TRIAGE,
+    );
+
+    expect(groups.map((group) => group.name)).toEqual(["alpha", "beta"]);
+    expect(groups[0]?.entries.map((item) => item.agent.id)).toEqual(["a1", "a2"]);
+    expect(groups[1]?.entries.map((item) => item.agent.id)).toEqual(["b1"]);
+  });
+
+  test("groups by provider and sorts groups by activity", () => {
+    const groups = groupByProvider(
+      [
+        entry({ id: "old", provider: "claude", updatedAt: "2026-08-25T09:00:00.000Z" }),
+        entry({ id: "new", provider: "opencode", updatedAt: "2026-08-25T12:00:00.000Z" }),
+      ],
+      { ...TRIAGE, agentSort: "updated" },
+    );
+
+    expect(groups.map((group) => group.name)).toEqual(["opencode", "claude"]);
+  });
+
+  test("builds host and provider rosters", () => {
+    const hostRoster = buildRoster(
+      [withHost(entry(), alpha)],
+      directory(),
+      {
+        grouping: "host",
+        floatPinned: true,
+        agentSort: "triage",
+      },
+      HOST,
+    );
+    expect(hostRoster.kind).toBe("host");
+
+    const providerRoster = buildRoster(
+      [entry()],
+      directory(),
+      {
+        grouping: "provider",
+        floatPinned: true,
+        agentSort: "triage",
+      },
+      HOST,
+    );
+    expect(providerRoster).toMatchObject({ kind: "provider" });
   });
 });

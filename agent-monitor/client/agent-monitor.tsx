@@ -22,6 +22,7 @@ import {
 } from "./focus-request";
 import { useAllHostsInteractionGraph } from "./graph-data";
 import { AgentGraph } from "./graph-view";
+import { GROUPING_CHOICES, layoutForKey, SORT_CHOICES } from "./layout-keys";
 import {
   type AgentEntry,
   age,
@@ -38,6 +39,7 @@ import {
   hostOf,
   matches,
   mergeProjectGroupsAcrossHosts,
+  type NamedGroup,
   type ProjectGroup,
   parentAgentId,
   parseBucketParam,
@@ -142,8 +144,30 @@ export function AgentMonitor(props: AgentMonitorProps) {
     [props.layout.compact, props.theme],
   );
 
+  // Layout clicks may arrive faster than a settings save resolves. Queue the
+  // patch and save it once the previous write lands, so the second choice is
+  // not rejected against a stale revision and silently dropped.
+  const [pendingLayout, setPendingLayout] = useState<Partial<
+    Pick<MonitorSettings, "grouping" | "agentSort">
+  > | null>(null);
+  useEffect(() => {
+    if (!pendingLayout || !settingsAreReady(settingsState) || settingsState.saving) return;
+    const state = settingsState;
+    const patch = pendingLayout;
+    setPendingLayout(null);
+    void state.save({ ...state.values, ...patch }, state.revision);
+  }, [pendingLayout, settingsState]);
+
   if (settingsAreReady(settingsState)) {
-    return <AgentMonitorRoster {...props} settings={settingsState.values} />;
+    const state = settingsState;
+    return (
+      <AgentMonitorRoster
+        {...props}
+        settings={state.values}
+        saveError={state.saveError}
+        onChangeLayout={(patch) => setPendingLayout((current) => ({ ...current, ...patch }))}
+      />
+    );
   }
 
   if (settingsState.status === "loading") {
@@ -229,7 +253,13 @@ function AgentMonitorRoster({
   agentParam,
   viewParam,
   settings,
-}: AgentMonitorProps & { settings: MonitorSettings }) {
+  saveError,
+  onChangeLayout,
+}: AgentMonitorProps & {
+  settings: MonitorSettings;
+  saveError?: string | null;
+  onChangeLayout(patch: Partial<Pick<MonitorSettings, "grouping" | "agentSort">>): void;
+}) {
   const monitor = useAllHostsMonitor();
   const { entries: allEntries, directory, hosts, truncated, failedHosts } = monitor;
 
@@ -242,6 +272,7 @@ function AgentMonitorRoster({
   const [now, setNow] = useState(() => Date.now());
   const [sweepArmed, setSweepArmed] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<ReadonlySet<string>>(() => new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [view, setView] = useState<"roster" | "graph" | "overview">(() =>
     viewParam === "overview" ? "overview" : "roster",
   );
@@ -275,11 +306,16 @@ function AgentMonitorRoster({
           case "c":
             setSelected(selected === "closed" ? null : "closed");
             break;
-          default:
+          default: {
+            // P/W/H/Y/N group; S/E/Z sort. Separate axes, so a host group still
+            // orders its rows by recency or title.
+            const layout = layoutForKey(event.key);
+            if (layout) onChangeLayout(layout);
             break;
+          }
         }
       },
-      [selected],
+      [onChangeLayout, selected],
     ),
   );
 
@@ -547,6 +583,23 @@ function AgentMonitorRoster({
         backgroundColor: theme.colors.surface0,
       },
       projectHeaderPressed: { backgroundColor: theme.colors.surface1 },
+      namedHeader: {
+        minHeight: layout.compact ? 44 : 32,
+        paddingHorizontal: gutter,
+        paddingTop: 10,
+        paddingBottom: 4,
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        gap: 8,
+        backgroundColor: theme.colors.surface0,
+      },
+      namedCount: { color: muted, fontSize: 11 },
+      orderLabel: {
+        color: muted,
+        fontSize: 11,
+        alignSelf: "center" as const,
+        marginRight: 2,
+      },
       workspaceHeader: {
         minHeight: layout.compact ? 44 : 32,
         paddingHorizontal: gutter,
@@ -912,6 +965,55 @@ function AgentMonitorRoster({
     [collapsedProjects, multiHost, navigation, renderWorkspaceGroup, settings, styles, theme],
   );
 
+  const renderNamedGroup = useCallback(
+    (group: NamedGroup) => {
+      const collapsed = collapsedGroups.has(group.id);
+      return (
+        <View key={group.id}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`${collapsed ? "Expand" : "Collapse"} ${group.name} group`}
+            accessibilityState={{ expanded: !collapsed }}
+            onPress={() =>
+              setCollapsedGroups((current) => {
+                const next = new Set(current);
+                if (next.has(group.id)) next.delete(group.id);
+                else next.add(group.id);
+                return next;
+              })
+            }
+            style={({ pressed }) => [styles.namedHeader, pressed && styles.projectHeaderPressed]}
+          >
+            <Icon
+              name={collapsed ? "ChevronRight" : "ChevronDown"}
+              size={14}
+              color={theme.colors.foregroundMuted}
+            />
+            <Text style={styles.projectTitle} numberOfLines={1} ellipsizeMode="tail">
+              {group.name}
+            </Text>
+            <Text style={styles.namedCount}>{group.entries.length}</Text>
+          </Pressable>
+          {collapsed
+            ? null
+            : group.entries.map((entry) => (
+                <View
+                  key={entry.agent.id}
+                  style={
+                    parentAgentId(entry.agent, hostOf(entry)?.serverId ?? "") !== null
+                      ? styles.childRow
+                      : undefined
+                  }
+                >
+                  {renderRow({ item: entry })}
+                </View>
+              ))}
+        </View>
+      );
+    },
+    [collapsedGroups, renderRow, styles, theme.colors.foregroundMuted],
+  );
+
   const separator = useCallback(() => <View style={styles.separator} />, [styles]);
   const empty = (
     <Text style={styles.empty}>
@@ -1043,6 +1145,56 @@ function AgentMonitorRoster({
               ))
             : null}
         </View>
+        <View style={styles.chips}>
+          <Text style={styles.orderLabel}>Group</Text>
+          {GROUPING_CHOICES.map((choice) => {
+            const active = settings.grouping === choice.id;
+            return (
+              <Pressable
+                key={choice.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Group by ${choice.label} (${choice.key})`}
+                accessibilityState={{ selected: active }}
+                onPress={() => onChangeLayout({ grouping: choice.id })}
+                style={active ? styles.chipOn : styles.chip}
+              >
+                <View style={styles.chipRow}>
+                  <KeyBadge
+                    digit={choice.key}
+                    badge={styles.keyBadge}
+                    label={styles.keyBadgeText}
+                  />
+                  <Text style={active ? styles.chipTextOn : styles.chipText}>{choice.label}</Text>
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+        <View style={styles.chips}>
+          <Text style={styles.orderLabel}>Sort</Text>
+          {SORT_CHOICES.map((choice) => {
+            const active = settings.agentSort === choice.id;
+            return (
+              <Pressable
+                key={choice.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Sort by ${choice.label} (${choice.key}): ${choice.hint}`}
+                accessibilityState={{ selected: active }}
+                onPress={() => onChangeLayout({ agentSort: choice.id })}
+                style={active ? styles.chipOn : styles.chip}
+              >
+                <View style={styles.chipRow}>
+                  <KeyBadge
+                    digit={choice.key}
+                    badge={styles.keyBadge}
+                    label={styles.keyBadgeText}
+                  />
+                  <Text style={active ? styles.chipTextOn : styles.chipText}>{choice.label}</Text>
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
         <TextInput
           style={styles.search}
           value={needle}
@@ -1077,6 +1229,11 @@ function AgentMonitorRoster({
           </View>
         ) : null}
       </View>
+      {saveError ? (
+        <Text accessibilityRole="alert" style={styles.error}>
+          {saveError}
+        </Text>
+      ) : null}
       {failedHosts.length > 0 ? (
         <Text style={styles.error}>
           {failedHosts.join(", ")} unreachable, showing the remaining hosts
@@ -1111,6 +1268,15 @@ function AgentMonitorRoster({
           keyExtractor={(entry) => entry.agent.id}
           contentContainerStyle={styles.listContent}
           renderItem={renderRow}
+          ItemSeparatorComponent={separator}
+          ListEmptyComponent={empty}
+        />
+      ) : roster.kind === "host" || roster.kind === "provider" ? (
+        <FlatList
+          data={roster.groups}
+          keyExtractor={(group) => group.id}
+          contentContainerStyle={styles.listContent}
+          renderItem={({ item }) => renderNamedGroup(item)}
           ItemSeparatorComponent={separator}
           ListEmptyComponent={empty}
         />
