@@ -1077,23 +1077,27 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
           await expect(
             resolveCancelOmpSubagent({ agentId, subagentId: handle }, registry),
           ).resolves.toEqual({ cancelled: true });
-          // The parent keeps running: it takes the aborted task result and answers before it ends.
-          await events.waitFor(
+          // The parent keeps running after the stop: the child is canceled first, then the parent
+          // answers, and only then does its turn complete, exactly once.
+          await events.waitFor((event) => isTerminal(event) && hasTurnId(event, turnId));
+          const canceledAt = events.findIndex(
             (event) =>
               event.type === "provider_subagent" &&
               event.event.type === "upsert" &&
               event.event.status === "canceled",
           );
-          await sleep(300);
-          expect(events.some((event) => isTerminal(event) && hasTurnId(event, turnId))).toBe(false);
-          await events.waitFor(
+          const continuesAt = events.findIndex(
             (event) =>
               event.type === "timeline" &&
               event.item.type === "assistant_message" &&
               event.item.text.includes("ROOT_CONTINUES"),
           );
-          expect(events.some((event) => isTerminal(event) && hasTurnId(event, turnId))).toBe(false);
-          await events.waitFor((event) => isTerminal(event) && hasTurnId(event, turnId));
+          const completedAt = events.findIndex(
+            (event) => isTerminal(event) && hasTurnId(event, turnId),
+          );
+          expect(canceledAt).toBeGreaterThanOrEqual(0);
+          expect(continuesAt).toBeGreaterThan(canceledAt);
+          expect(completedAt).toBeGreaterThan(continuesAt);
           expect(events.filter((event) => isTerminal(event) && hasTurnId(event, turnId))).toEqual([
             expect.objectContaining({ type: "turn_completed" }),
           ]);
