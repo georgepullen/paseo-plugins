@@ -79,6 +79,8 @@ Paseo shows each OMP subagent as a read-only child of its agent. While subagents
 
 Rows disappear as their subagents finish. Outcomes and errors appear as Paseo toasts. The controls reach only the subagents of the agent they belong to, and only while that agent's OMP runtime is running; they never start or resume a runtime. OMP names subagents after their task, so rows show agent types and descriptions after the agent's `outputRedaction` and address each subagent by an opaque handle rather than its OMP ID. Both actions need OMP 18.4.9 or newer.
 
+The controls follow Paseo's client trust model. They are plugin RPCs, which the daemon only accepts from clients with its `daemon.manage` permission; that permission already covers stopping or messaging any agent, so the agent ID in a request selects the agent rather than limiting who may act on it.
+
 ## Credentials and environment
 
 The plugin is deny-by-default. It inherits only its fixed built-in allowlist of core provider authentication variables, exact host-wide names an operator selects in **OMP → Plugin**, and additional exact profile names under `providerOptions.inheritEnv`; it does not discover or inherit arbitrary credential-shaped names. Prefer OMP's native credential store or auth broker whenever possible.
