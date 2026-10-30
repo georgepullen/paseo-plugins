@@ -151,6 +151,54 @@ describe("OMP direct provider", () => {
     expect(items.some((item) => item.type === "tool_call" && item.name === "yield")).toBe(false);
   });
 
+  test("keeps rendering assistant messages past 1,024 identities in one turn", () => {
+    const events: ProviderEvent[] = [];
+    const projector = new OmpTimelineProjector(
+      "long-turn-session",
+      (event) => events.push(event),
+      new ManualScheduler(),
+    );
+    const turnId = "long-turn";
+    const messageCount = 1_100;
+    function projectAssistant(index: number, text: string): void {
+      projector.project(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            responseId: `response-${index}`,
+            content: [{ type: "text", text }],
+          },
+        },
+        turnId,
+      );
+      projector.flush(true);
+    }
+    function assistantIdFor(text: string): string | undefined {
+      const items = events.flatMap((event) => (event.type === "timeline.item" ? [event.item] : []));
+      return items.findLast((item) => item.type === "assistant_message" && item.text === text)?.id;
+    }
+
+    for (let index = 0; index < messageCount; index += 1) {
+      projectAssistant(index, `message ${index}`);
+    }
+    const ids = Array.from({ length: messageCount }, (_, index) =>
+      assistantIdFor(`message ${index}`),
+    );
+    expect(ids.every((id) => id !== undefined)).toBe(true);
+    expect(new Set(ids).size).toBe(messageCount);
+
+    const oldestRetained = messageCount - 1_024;
+    projectAssistant(messageCount - 1, "late update to the newest message");
+    projectAssistant(oldestRetained, "late update to the oldest retained message");
+    projectAssistant(oldestRetained - 1, "late update to an evicted message");
+    expect(assistantIdFor("late update to the newest message")).toBe(ids[messageCount - 1]);
+    expect(assistantIdFor("late update to the oldest retained message")).toBe(ids[oldestRetained]);
+    const evicted = assistantIdFor("late update to an evicted message");
+    expect(evicted).toBeDefined();
+    expect(ids).not.toContain(evicted);
+  });
+
   test("applies the latest pre-execution stream preview when the tool starts", () => {
     const events: ProviderEvent[] = [];
     const projector = new OmpTimelineProjector(

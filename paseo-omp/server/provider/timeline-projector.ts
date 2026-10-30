@@ -372,8 +372,8 @@ export class OmpTimelineProjector {
   private flushTimer: unknown;
   private currentTurnId: string | null = null;
   private assistantSequence = 0;
+  // Least recently used first, so a long turn evicts its oldest identities.
   private readonly turnNativeMessageIds = new Map<string, string>();
-  private nativeIdentitySaturated = false;
   private assistantIdentitySequence = 0;
   private noticeSequence = 0;
   private toolSequence = 0;
@@ -901,7 +901,6 @@ export class OmpTimelineProjector {
     this.currentTurnId = null;
     this.assistantSequence = 0;
     this.turnNativeMessageIds.clear();
-    this.nativeIdentitySaturated = false;
     this.assistantIdentitySequence = 0;
     this.toolSequence = 0;
     this.userSequence = 0;
@@ -1174,7 +1173,6 @@ export class OmpTimelineProjector {
     this.currentTurnId = null;
     this.assistantSequence = 0;
     this.turnNativeMessageIds.clear();
-    this.nativeIdentitySaturated = false;
   }
 
   close(): void {
@@ -1242,13 +1240,12 @@ export class OmpTimelineProjector {
     this.commandPublishedText = "";
   }
 
-  private beginStream(message: OmpAssistantMessage, turnId: string): StreamSnapshot | null {
+  private beginStream(message: OmpAssistantMessage, turnId: string): StreamSnapshot {
     this.assistantSequence += 1;
     const nativeIdentity = assistantIdentity(message);
     const messageId = nativeIdentity
       ? this.messageIdForNativeIdentity(nativeIdentity)
       : this.nextAssistantMessageId(`turn:${turnId}:${this.assistantSequence}`);
-    if (!messageId) return null;
     this.stream = {
       messageId,
       ...(nativeIdentity ? { nativeIdentity } : {}),
@@ -1261,15 +1258,16 @@ export class OmpTimelineProjector {
     };
     return this.stream;
   }
-  private messageIdForNativeIdentity(nativeIdentity: string): string | undefined {
+  private messageIdForNativeIdentity(nativeIdentity: string): string {
     const existing = this.turnNativeMessageIds.get(nativeIdentity);
-    if (existing) return existing;
-    if (
-      this.nativeIdentitySaturated ||
-      this.turnNativeMessageIds.size >= MAX_TURN_NATIVE_IDENTITIES
-    ) {
-      this.nativeIdentitySaturated = true;
-      return undefined;
+    if (existing) {
+      this.turnNativeMessageIds.delete(nativeIdentity);
+      this.turnNativeMessageIds.set(nativeIdentity, existing);
+      return existing;
+    }
+    if (this.turnNativeMessageIds.size >= MAX_TURN_NATIVE_IDENTITIES) {
+      const oldest = this.turnNativeMessageIds.keys().next().value;
+      if (oldest !== undefined) this.turnNativeMessageIds.delete(oldest);
     }
     const messageId = this.nextAssistantMessageId(nativeIdentity);
     this.turnNativeMessageIds.set(nativeIdentity, messageId);
@@ -1290,12 +1288,7 @@ export class OmpTimelineProjector {
     const nativeIdentity = assistantIdentity(message);
     if (this.stream && nativeIdentity && this.stream.nativeIdentity !== nativeIdentity) {
       if (!this.stream.nativeIdentity && !this.stream.published) {
-        const messageId = this.messageIdForNativeIdentity(nativeIdentity);
-        if (!messageId) {
-          this.stream = null;
-          return;
-        }
-        this.stream.messageId = messageId;
+        this.stream.messageId = this.messageIdForNativeIdentity(nativeIdentity);
         this.stream.nativeIdentity = nativeIdentity;
       } else {
         this.flush();
@@ -1303,7 +1296,6 @@ export class OmpTimelineProjector {
       }
     }
     const stream = this.stream ?? this.beginStream(message, turnId);
-    if (!stream) return;
     if (update?.contentIndex !== undefined) {
       this.updateBlock(stream, message, update.contentIndex, update);
       return;
