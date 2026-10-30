@@ -3499,9 +3499,28 @@ export class OmpProviderSession implements OmpOpenedSession {
       });
       this.runtimeTurnCompleted = true;
       if (this.activeTurn === turn) this.activeTurn = null;
-    })();
+    })().catch(() => this.failTerminalization(turn));
     turn.terminalization = terminalization;
     return terminalization;
+  }
+
+  /** A turn whose terminal state could not be published must not keep owning the session. */
+  private failTerminalization(turn: ActiveTurn): void {
+    const message = "OMP turn could not be finalized";
+    turn.terminal = true;
+    if (this.activeTurn === turn) this.activeTurn = null;
+    try {
+      this.emit({
+        type: "session.turn",
+        sessionId: this.id,
+        turnId: turn.turnId,
+        state: "failed",
+        error: { message },
+      });
+    } catch {
+      // Publishing the terminal may be what failed; the runtime failure below still applies.
+    }
+    this.handleRuntimeFailure(message);
   }
 
   private invalidateRuntime(
