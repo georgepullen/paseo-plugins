@@ -26,11 +26,6 @@ const PILLS: readonly { key: ComposerPillKey; label: string; hint: string }[] = 
     hint: "OMP-native server controls on OMP Plugin agents",
   },
   {
-    key: "subagents",
-    label: "Subagents",
-    hint: "Cancel or steer running OMP subagents on OMP Plugin agents",
-  },
-  {
     key: "hub",
     label: "Hub",
     hint: "Supervised process status when this workspace has Hub processes",

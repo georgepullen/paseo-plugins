@@ -17,23 +17,6 @@ export const OmpSubagentStatusSchema = z.enum([
 ]);
 export type OmpSubagentStatus = z.infer<typeof OmpSubagentStatusSchema>;
 
-export const OmpSubagentSchema = z.object({
-  /** Opaque handle scoped to the agent's current OMP session, never the native OMP ID. */
-  id: SubagentIdSchema,
-  /** The native OMP ID for display, after the session's output redaction. */
-  name: z.string().min(1).max(256),
-  agent: z.string().min(1).max(256),
-  description: z.string().max(OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH).nullable(),
-  status: OmpSubagentStatusSchema,
-});
-export type OmpSubagent = z.infer<typeof OmpSubagentSchema>;
-
-export const listOmpSubagents = defineRpc({
-  name: "paseo-omp.list-subagents",
-  input: z.object({ agentId: AgentIdSchema }),
-  output: z.object({ subagents: z.array(OmpSubagentSchema).max(1_024) }),
-});
-
 export const cancelOmpSubagent = defineRpc({
   name: "paseo-omp.cancel-subagent",
   input: z.object({ agentId: AgentIdSchema, subagentId: SubagentIdSchema }),
@@ -50,6 +33,26 @@ export const steerOmpSubagent = defineRpc({
   }),
   output: z.object({ accepted: z.literal(true) }),
 });
+
+export const OMP_SUBAGENT_STRIP_KIND = "omp-subagents";
+export const MAX_OMP_SUBAGENT_STRIP_ENTRIES = 64;
+
+/** The running subagents of one `task` call, rendered below its tool card. */
+export const ompSubagentStripSchema = z.object({
+  subagents: z
+    .array(
+      z.object({
+        /** Opaque handle scoped to the agent's current OMP session, never the native OMP ID. */
+        id: SubagentIdSchema,
+        agent: z.string().min(1).max(256),
+        description: z.string().max(OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH).nullable(),
+        /** Epoch milliseconds when the plugin last saw the subagent start running. */
+        runningSince: z.number().int().nonnegative(),
+      }),
+    )
+    .max(MAX_OMP_SUBAGENT_STRIP_ENTRIES),
+});
+export type OmpSubagentStrip = z.infer<typeof ompSubagentStripSchema>;
 
 /** OMP reaches a subagent only while its roster lists it as running or pending. */
 export function isLiveOmpSubagentStatus(status: OmpSubagentStatus): boolean {

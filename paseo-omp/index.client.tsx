@@ -38,7 +38,7 @@ import {
   HUB_SIDEBAR_ITEM_ID,
   loadHubSnapshot,
 } from "./client/sidebar-compat";
-import { SubagentsPopover } from "./client/subagents-popover";
+import { OmpSubagentStrip } from "./client/subagents-strip";
 import {
   type ComposerPillSettings,
   composerPillSettings,
@@ -49,6 +49,7 @@ import { OMP_MCP_AUTH_TIMELINE_KIND, ompMcpAuthorizationTimelineSchema } from ".
 import { type OmpStore, storeForProvider } from "./shared/omp-store";
 import { ompImageTimelineSchema, transformOmpImageToolItem } from "./shared/provider-image";
 import { listOmpQuotas } from "./shared/quota";
+import { OMP_SUBAGENT_STRIP_KIND, ompSubagentStripSchema } from "./shared/subagents";
 
 const PAGE_LIMIT = 200;
 const MAX_PAGES = 10;
@@ -72,7 +73,6 @@ type PillEntry = {
   sessions?: PluginButtonRegistration;
   quota?: PluginButtonRegistration;
   mcp?: PluginButtonRegistration;
-  subagents?: PluginButtonRegistration;
 };
 
 function samePillSettings(
@@ -81,7 +81,6 @@ function samePillSettings(
 ): boolean {
   return (
     left?.mcp === right.mcp &&
-    left.subagents === right.subagents &&
     left.hub === right.hub &&
     left.memory === right.memory &&
     left.sessions === right.sessions &&
@@ -95,7 +94,6 @@ function removePills(entry: PillEntry): void {
   entry.sessions?.remove();
   entry.quota?.remove();
   entry.mcp?.remove();
-  entry.subagents?.remove();
 }
 
 async function loadAgents(paseo: PaseoApi): Promise<AgentEntry[]> {
@@ -241,6 +239,12 @@ export default function contribute(client: PluginClientContext) {
     schema: ompMcpAuthorizationTimelineSchema,
     Component: OmpMcpAuthorizationCard,
   });
+  const removeSubagentStripRenderer = client.addTimelineRenderer({
+    kind: OMP_SUBAGENT_STRIP_KIND,
+    version: 1,
+    schema: ompSubagentStripSchema,
+    Component: OmpSubagentStrip,
+  });
   const removeImageTransformer = client.addTimelineTransformer({
     id: "omp-images",
     query: { itemType: "tool_call" },
@@ -272,23 +276,6 @@ export default function contribute(client: PluginClientContext) {
     } else {
       entry.mcp?.remove();
       entry.mcp = undefined;
-    }
-
-    if (settings.subagents && isOmpPluginProvider(agent.provider)) {
-      entry.subagents ??= client.addComposerPill({
-        id: "subagents",
-        workspaceId: entry.workspaceId,
-        agentId: agent.id,
-        button: {
-          title: "Cancel or steer OMP subagents",
-          icon: "Bot",
-          label: "Subagents",
-          behavior: { kind: "popover", Content: SubagentsPopover },
-        },
-      });
-    } else {
-      entry.subagents?.remove();
-      entry.subagents = undefined;
     }
 
     if (settings.hub) {
@@ -565,6 +552,7 @@ export default function contribute(client: PluginClientContext) {
     pills.clear();
     removeImageRenderer();
     removeMcpAuthorizationRenderer();
+    removeSubagentStripRenderer();
     removeImageTransformer();
     removeOpenConfig();
     removeConfigEntry();

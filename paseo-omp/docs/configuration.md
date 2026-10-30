@@ -72,12 +72,12 @@ Paseo's exact session `toolPolicy` preapproval grants are not equivalent to OMP'
 
 ## Subagent controls
 
-Paseo shows each OMP subagent as a read-only child of its agent. Use the **Subagents** control beside the composer on an **OMP Plugin** agent to list that agent's running subagents and act on one of them:
+Paseo shows each OMP subagent as a read-only child of its agent. While subagents run, an **OMP Plugin** agent's conversation shows one row per running subagent under the `task` card that started it, with its agent type, description, and running time:
 
-- **Cancel** asks for confirmation, then calls OMP's `cancel_subagent`. OMP stops the subagent and its nested subagents; the parent turn continues and receives an aborted task result. Cancelling a subagent that already finished reports that and changes nothing.
-- **Steer** sends up to 16,384 characters through OMP's `steer_subagent`. The subagent receives it as its user at its next step, so slash commands and prompt templates run in the subagent. If OMP does not confirm delivery before the provider RPC timeout, the message may still arrive; check the subagent before sending it again.
+- **Steer** opens a one-line message field in place. Enter sends up to 16,384 characters through OMP's `steer_subagent` and Esc closes it. The subagent receives the message as its user at its next step, so slash commands and prompt templates run in the subagent. If OMP does not confirm delivery before the provider RPC timeout, the message may still arrive; check the subagent before sending it again.
+- **Stop** asks for confirmation in place, then calls OMP's `cancel_subagent`. OMP stops the subagent and its nested subagents; the parent turn continues and receives an aborted task result. Stopping a subagent that already finished reports that and changes nothing.
 
-The control reaches only the subagents of the agent it belongs to, and only while that agent's OMP runtime is running; it never starts or resumes a runtime. OMP names subagents after their task, so the control shows those names, agent types, and descriptions after the agent's `outputRedaction` and addresses each subagent by an opaque handle rather than its OMP ID. Both actions need OMP 18.4.9 or newer. Turn the pill off in **OMP → Composer**.
+Rows disappear as their subagents finish. Outcomes and errors appear as Paseo toasts. The controls reach only the subagents of the agent they belong to, and only while that agent's OMP runtime is running; they never start or resume a runtime. OMP names subagents after their task, so rows show agent types and descriptions after the agent's `outputRedaction` and address each subagent by an opaque handle rather than its OMP ID. Both actions need OMP 18.4.9 or newer.
 
 ## Credentials and environment
 

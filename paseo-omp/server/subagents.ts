@@ -1,16 +1,10 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
-import type {
-  cancelOmpSubagent,
-  listOmpSubagents,
-  OmpSubagent,
-  steerOmpSubagent,
-} from "../shared/subagents";
+import type { cancelOmpSubagent, steerOmpSubagent } from "../shared/subagents";
 import { OmpRpcRequestRejectedError } from "./provider/omp-rpc-transport";
 import { isOmpPublicError, OmpPublicError } from "./provider/security";
 
 /** Subagent controls of one live OMP session; history-only sessions never register. */
 export interface OmpSubagentControls {
-  listSubagents(): Promise<OmpSubagent[]>;
   /** Resolves `false` when the subagent is no longer running. */
   cancelSubagent(handle: string): Promise<boolean>;
   steerSubagent(handle: string, message: string): Promise<void>;
@@ -22,17 +16,15 @@ export class OmpSubagentNotRunningError extends OmpPublicError {
   }
 }
 
-type SubagentOperation = "list" | "cancel" | "steer";
+type SubagentOperation = "cancel" | "steer";
 
 const OPERATION_FAILURES: Record<SubagentOperation, string> = {
-  list: "Could not list the OMP subagents",
   cancel: "OMP could not cancel the subagent",
   steer: "OMP did not accept the message. The subagent may have finished or refused it",
 };
 
 // A timed-out request is not withdrawn from OMP, so its outcome is unknown rather than failed.
 const OPERATION_TIMEOUTS: Record<SubagentOperation, string> = {
-  list: "OMP did not list its subagents in time",
   cancel: "OMP did not confirm the cancellation in time. Check the subagent before retrying",
   steer: "OMP did not confirm delivery in time. The subagent may still receive the message",
 };
@@ -83,15 +75,6 @@ function controlsFor(registry: OmpSubagentControlRegistry, agentId: string): Omp
   const controls = registry.get(agentId);
   if (!controls) throw new OmpPublicError("This agent has no running OMP Plugin session");
   return controls;
-}
-
-export async function resolveListOmpSubagents(
-  input: RpcInput<typeof listOmpSubagents>,
-  registry: OmpSubagentControlRegistry,
-): Promise<RpcOutput<typeof listOmpSubagents>> {
-  const controls = registry.get(input.agentId);
-  if (!controls) return { subagents: [] };
-  return { subagents: await withPublicFailure("list", () => controls.listSubagents()) };
 }
 
 export async function resolveCancelOmpSubagent(

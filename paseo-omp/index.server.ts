@@ -32,7 +32,6 @@ import { resolveListOmpSessions } from "./server/sessions";
 import {
   OmpSubagentControlRegistry,
   resolveCancelOmpSubagent,
-  resolveListOmpSubagents,
   resolveSteerOmpSubagent,
 } from "./server/subagents";
 import { resolveGetOmpSupportReport } from "./server/support-diagnostics";
@@ -54,7 +53,7 @@ import { getOmpProviderHealth } from "./shared/provider-diagnostics";
 import { providerLaunchSettings } from "./shared/provider-launch-settings";
 import { listOmpQuotas } from "./shared/quota";
 import { listOmpSessions } from "./shared/sessions";
-import { cancelOmpSubagent, listOmpSubagents, steerOmpSubagent } from "./shared/subagents";
+import { cancelOmpSubagent, steerOmpSubagent } from "./shared/subagents";
 import { getOmpSupportReport } from "./shared/support-diagnostics";
 
 function scoped<T extends { store?: OmpStore }, R>(handler: (input: T) => R) {
@@ -112,9 +111,6 @@ export default function contribute(server: PluginServerContext) {
   );
   server.handle(openOmpMcpAuthorizationInPaseoBrowser, (input) =>
     resolveOpenOmpMcpAuthorizationInPaseoBrowser(input, browserAuthorizationRegistry),
-  );
-  server.handle(listOmpSubagents, (input) =>
-    resolveListOmpSubagents(input, subagentControlRegistry),
   );
   server.handle(cancelOmpSubagent, (input) =>
     resolveCancelOmpSubagent(input, subagentControlRegistry),

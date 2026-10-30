@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type {
   ProviderConfigState,
   ProviderError,
@@ -6,11 +6,7 @@ import type {
   ProviderInput,
   ProviderSessionConfig,
 } from "@getpaseo/plugin/server/provider";
-import {
-  isLiveOmpSubagentStatus,
-  OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH,
-  type OmpSubagent,
-} from "../../shared/subagents";
+import { isLiveOmpSubagentStatus } from "../../shared/subagents";
 import type {
   OmpOperationalFailure,
   OmpOperationalFailureReporter,
@@ -90,7 +86,7 @@ import {
   unknownTerminalOutcomeError,
 } from "./session-terminal";
 import { OmpSessionUsage } from "./session-usage";
-import { OmpSubsessionProjector } from "./subsessions";
+import { OmpSubsessionProjector, ompSubagentHandle } from "./subsessions";
 import {
   defaultOmpTimelineScheduler,
   OmpTimelineProjector,
@@ -471,24 +467,6 @@ export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls
     this.projector.setBrowserAuthorizationIssuer(issue);
   }
 
-  /** Never starts or recovers a runtime: a dead or closed one has no running subagents. */
-  async listSubagents(): Promise<OmpSubagent[]> {
-    if (this.closed || this.runtimeDead) return [];
-    const snapshots = await this.runtime.getSubagents();
-    return snapshots.map((snapshot) => {
-      const description = snapshot.description ?? snapshot.assignment;
-      return {
-        id: this.subagentHandle(snapshot.id),
-        name: this.dataFilter.text(snapshot.id, 256),
-        agent: this.dataFilter.text(snapshot.agent, 256),
-        description: description
-          ? this.dataFilter.text(description, OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH)
-          : null,
-        status: snapshot.status,
-      };
-    });
-  }
-
   async cancelSubagent(handle: string): Promise<boolean> {
     const target = await this.liveSubagent(handle);
     return target ? await target.runtime.cancelSubagent(target.nativeId) : false;
@@ -498,19 +476,6 @@ export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls
     const target = await this.liveSubagent(handle);
     if (!target) throw new OmpSubagentNotRunningError();
     await target.runtime.steerSubagent(target.nativeId, message);
-  }
-
-  /**
-   * OMP derives subagent IDs from model-chosen task names, so clients only see this opaque,
-   * session-scoped handle and a redacted display name.
-   */
-  private subagentHandle(nativeId: string): string {
-    return createHash("sha256")
-      .update(this.id)
-      .update("\0")
-      .update(nativeId)
-      .digest("base64url")
-      .slice(0, 32);
   }
 
   /**
@@ -526,7 +491,8 @@ export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls
     if (runtime !== this.runtime || this.closed || this.runtimeDead) return null;
     const live = snapshots.find(
       (snapshot) =>
-        this.subagentHandle(snapshot.id) === handle && isLiveOmpSubagentStatus(snapshot.status),
+        ompSubagentHandle(this.id, snapshot.id) === handle &&
+        isLiveOmpSubagentStatus(snapshot.status),
     );
     return live ? { runtime, nativeId: live.id } : null;
   }
@@ -2699,6 +2665,9 @@ export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls
         stage: "timeline-projector",
       });
       throw error;
+    }
+    if (event.type === "tool_execution_start" && event.toolName === "task") {
+      this.subsessions?.anchorRootTask(event.toolCallId);
     }
     if (event.type === "tool_execution_end") this.resumeDeferredAgentEnd();
   }

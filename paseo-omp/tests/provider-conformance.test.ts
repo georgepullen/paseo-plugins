@@ -25,9 +25,9 @@ import { OMP_SESSION_PURPOSE_ENV } from "../server/provider/session-purpose";
 import {
   OmpSubagentControlRegistry,
   resolveCancelOmpSubagent,
-  resolveListOmpSubagents,
   resolveSteerOmpSubagent,
 } from "../server/subagents";
+import { OMP_SUBAGENT_STRIP_KIND, ompSubagentStripSchema } from "../shared/subagents";
 
 const pluginProviderModulePath = new URL(
   "../node_modules/@getpaseo/server/dist/server/server/agent/plugin-provider.js",
@@ -1041,20 +1041,21 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
           const { turnId } = await session.startTurn("CONTRACT_SUBAGENT_HOLD", {
             clientMessageId: "held",
           });
-          await events.waitFor(
-            (event) =>
-              event.type === "provider_subagent" &&
-              event.event.type === "upsert" &&
-              event.event.status === "running",
-          );
-          const { subagents } = await resolveListOmpSubagents({ agentId }, registry);
+          const isStrip = (event: AgentStreamEvent) =>
+            event.type === "timeline" &&
+            event.item.type === "plugin" &&
+            event.item.kind === OMP_SUBAGENT_STRIP_KIND;
+          const published = await events.waitFor(isStrip);
+          if (published.type !== "timeline" || published.item.type !== "plugin") {
+            throw new Error("Expected the subagent strip");
+          }
+          const { subagents } = ompSubagentStripSchema.parse(published.item.data);
           expect(subagents).toEqual([
             {
-              id: expect.any(String),
-              name: "held-child",
+              id: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/),
               agent: "worker",
               description: "held child",
-              status: "running",
+              runningSince: expect.any(Number),
             },
           ]);
           const handle = subagents[0]?.id ?? "";
@@ -1089,9 +1090,10 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
           await expect(
             resolveCancelOmpSubagent({ agentId, subagentId: handle }, registry),
           ).resolves.toEqual({ cancelled: false });
-          await expect(resolveListOmpSubagents({ agentId }, registry)).resolves.toEqual({
-            subagents: [],
-          });
+          const strips = events.filter(isStrip);
+          expect(strips.at(-1)).toEqual(
+            expect.objectContaining({ item: expect.objectContaining({ data: { subagents: [] } }) }),
+          );
           const commands = await loggedCommands(harness);
           expect(commands).toContainEqual(
             expect.objectContaining({
@@ -1109,9 +1111,6 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
         }
         await session.close();
         session = undefined;
-        await expect(resolveListOmpSubagents({ agentId }, registry)).resolves.toEqual({
-          subagents: [],
-        });
         expect(registry.get(agentId)).toBeUndefined();
       } finally {
         await session?.close();
