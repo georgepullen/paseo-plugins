@@ -238,7 +238,7 @@ function RowActions({ row, state, styles, theme, dispatch }: RowProps) {
         onPress={() => dispatch({ type: "start-steer", subagent: row })}
       />
       <IconButton
-        icon="Square"
+        icon="CircleStop"
         label="Stop this subagent and its nested subagents; the parent keeps running"
         disabled={pending}
         styles={styles}
