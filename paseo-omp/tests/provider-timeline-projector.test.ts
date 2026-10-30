@@ -197,6 +197,18 @@ describe("OMP direct provider", () => {
     const evicted = assistantIdFor("late update to an evicted message");
     expect(evicted).toBeDefined();
     expect(ids).not.toContain(evicted);
+
+    // The hit moved the oldest retained identity to the most recent position, so re-inserting
+    // the evicted identity evicted the next one instead.
+    projectAssistant(oldestRetained, "second late update to the oldest retained message");
+    projectAssistant(oldestRetained + 1, "late update after the hit changed eviction order");
+    expect(assistantIdFor("second late update to the oldest retained message")).toBe(
+      ids[oldestRetained],
+    );
+    const reordered = assistantIdFor("late update after the hit changed eviction order");
+    expect(reordered).toBeDefined();
+    expect(ids).not.toContain(reordered);
+    expect(reordered).not.toBe(evicted);
   });
 
   test("applies the latest pre-execution stream preview when the tool starts", () => {
