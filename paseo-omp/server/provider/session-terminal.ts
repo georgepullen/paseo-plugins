@@ -96,6 +96,7 @@ type RunEvidence = Pick<
 /** A run that ended with `isTerminal: false`, kept until another run starts or OMP settles. */
 export type HeldAgentEnd = {
   event: Extract<OmpRpcEvent, { type: "agent_end" }>;
+  arrivalSequence: number;
   evidence: RunEvidence;
 };
 

@@ -5,6 +5,7 @@ import {
   type EventLog,
   establishTerminalOwnership,
   FakeOmpRuntime,
+  finishTurn,
   openSession,
   sessionAt,
   startPrompt,
@@ -132,6 +133,128 @@ describe("OMP runs started without a client prompt", () => {
     expect(await terminalOf(events, second.turnId)).toEqual(
       expect.objectContaining({ state: "failed", error: { message: "OMP assistant turn failed" } }),
     );
+    await connection.close();
+  });
+
+  test("closes the previous turn when its idle check sees the next run already streaming", async () => {
+    const { connection, events, session } = await openIdle();
+    const first = turnIdFrom(await startPrompt(connection, events, "first", "work"));
+    const state = Promise.withResolvers<void>();
+    const checking = Promise.withResolvers<void>();
+    session.stateGate = state.promise;
+    session.stateObserved = checking.resolve;
+    establishTerminalOwnership(session);
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-1",
+      messages: [reply("first done")],
+      isTerminal: true,
+    });
+    await checking.promise;
+    session.emit({ type: "agent_start" });
+    session.emit({ type: "message_end", message: reply("second still working") });
+    session.isStreaming = true;
+    session.stateGate = null;
+    state.resolve();
+
+    expect(await terminalOf(events, first)).toEqual(
+      expect.objectContaining({ state: "completed" }),
+    );
+    const second = await within(
+      events.waitFor(
+        (event) =>
+          event.type === "session.turn" && event.state === "started" && event.turnId !== first,
+      ),
+      "the self-started run's turn",
+    );
+    if (second.type !== "session.turn") throw new Error("Expected a turn event");
+    session.isStreaming = false;
+    session.emit({
+      type: "agent_end",
+      messages: [reply("second broke", "error")],
+      isTerminal: true,
+    });
+    expect(await terminalOf(events, second.turnId)).toEqual(
+      expect.objectContaining({ state: "failed" }),
+    );
+    await connection.close();
+  });
+
+  test("fails the runtime when a run buffered behind a pending terminal exceeds its bound", async () => {
+    const { connection, events, session } = await openIdle();
+    const first = turnIdFrom(await startPrompt(connection, events, "first", "work"));
+    const checking = Promise.withResolvers<void>();
+    session.stateGate = new Promise(() => {});
+    session.stateObserved = checking.resolve;
+    establishTerminalOwnership(session);
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-1",
+      messages: [reply("first done")],
+      isTerminal: true,
+    });
+    await checking.promise;
+    session.emit({ type: "agent_start" });
+    for (let index = 0; index < 512; index += 1) {
+      session.emit({ type: "message_end", message: reply(`step ${index}`) });
+    }
+
+    expect(await terminalOf(events, first)).toEqual(
+      expect.objectContaining({ state: "failed", error: { message: "OMP runtime failed" } }),
+    );
+    expect(session.closes).toBe(1);
+    await connection.close();
+  });
+
+  test("restores a truncated held end's streamed outcome when OMP settles", async () => {
+    const { connection, events, session } = await openIdle();
+    const turnId = turnIdFrom(await startPrompt(connection, events, "held-truncated", "work"));
+    session.canReplayHistory = false;
+    establishTerminalOwnership(session);
+    session.emit({ type: "message_end", message: reply("broke", "error") });
+    session.emit({
+      type: "agent_end",
+      requestId: "rpc-prompt-1",
+      messageCount: 1,
+      messages: [],
+      isTerminal: false,
+    });
+    session.emit({ type: "session_settled" });
+
+    expect(await terminalOf(events, turnId)).toEqual(
+      expect.objectContaining({ state: "failed", error: { message: "OMP assistant turn failed" } }),
+    );
+    await connection.close();
+  });
+
+  test("does not let evidence that arrives after a held end authorize it", async () => {
+    const { connection, events, scheduler, session } = await openIdle();
+    const first = turnIdFrom(await startPrompt(connection, events, "held-a", "first"));
+    await finishTurn(events, session, first);
+    session.promptAgentInvoked = undefined;
+    const turnId = turnIdFrom(await startPrompt(connection, events, "held-b", "second"));
+    // Unkeyed and ahead of any evidence for this prompt: not attributable to it.
+    session.emit({ type: "agent_end", messages: [reply("old success")], isTerminal: false });
+    session.branchMessages.push({ entryId: "held-user", text: "second" });
+    session.emit({ type: "message_end", message: { role: "user", content: "second" } });
+    await events.waitFor(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "user_message" &&
+        event.item.clientMessageId === "held-b",
+    );
+    session.emit({ type: "message_end", message: reply("current failure", "error") });
+    session.emit({ type: "session_settled" });
+    await scheduler.flush(2_000);
+    // Let any terminal check the promotion started run to completion.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(
+      events.some(
+        (event) =>
+          event.type === "session.turn" && event.turnId === turnId && event.state === "completed",
+      ),
+    ).toBe(false);
     await connection.close();
   });
 

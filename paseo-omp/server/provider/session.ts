@@ -2554,7 +2554,8 @@ export class OmpProviderSession implements OmpOpenedSession {
       if (!held) return;
       turn.heldAgentEnd = undefined;
       Object.assign(turn, held.evidence);
-      this.handleTurnEvent(turn, { ...held.event, isTerminal: true }, correlatesToAcceptedPrompt);
+      // Ownership is judged as of the held end's arrival, never from evidence that came later.
+      this.acceptTerminal(turn, { ...held.event, isTerminal: true }, held.arrivalSequence);
       return;
     }
     if (event.type === "agent_end" && turn.manualCompactionPending) return;
@@ -2590,32 +2591,17 @@ export class OmpProviderSession implements OmpOpenedSession {
     }
     if (event.type === "agent_end") {
       if (event.isTerminal === false) {
-        const held = { event, evidence: takeRunEvidence(turn) };
+        const held = {
+          event,
+          arrivalSequence: turn.activitySequence,
+          evidence: takeRunEvidence(turn),
+        };
         turn.heldAgentEnd = held;
         this.scheduleHeldTurnCheck(turn, held);
         return;
       }
       turn.heldAgentEnd = undefined;
-      const candidate: TerminalCandidate = turn.interrupted
-        ? { event, confidence: "interrupted", arrivalSequence: turn.activitySequence }
-        : classifyTerminalCandidate(turn, event);
-      if (candidate.confidence === "ambiguous") {
-        this.deferAmbiguousTerminal(turn, candidate);
-        return;
-      }
-      turn.nativeActivity = true;
-      this.cancelLocalOnlyCompletion(turn);
-      if (
-        (!turn.interrupted &&
-          candidate.confidence !== "keyed" &&
-          this.hasTerminalConflict(turn, false)) ||
-        turn.steersInFlight > 0 ||
-        turn.terminalizing
-      ) {
-        turn.deferredAgentEnd = candidate;
-        return;
-      }
-      this.beginTerminalization(turn, candidate);
+      this.acceptTerminal(turn, event, turn.activitySequence);
       return;
     }
     if (isNativeTurnActivity(event)) {
@@ -2649,6 +2635,33 @@ export class OmpProviderSession implements OmpOpenedSession {
       throw error;
     }
     if (event.type === "tool_execution_end") this.resumeDeferredAgentEnd();
+  }
+
+  private acceptTerminal(
+    turn: ActiveTurn,
+    event: Extract<OmpRpcEvent, { type: "agent_end" }>,
+    arrivalSequence: number,
+  ): void {
+    const candidate: TerminalCandidate = turn.interrupted
+      ? { event, confidence: "interrupted", arrivalSequence }
+      : classifyTerminalCandidate(turn, event, arrivalSequence);
+    if (candidate.confidence === "ambiguous") {
+      this.deferAmbiguousTerminal(turn, candidate);
+      return;
+    }
+    turn.nativeActivity = true;
+    this.cancelLocalOnlyCompletion(turn);
+    if (
+      (!turn.interrupted &&
+        candidate.confidence !== "keyed" &&
+        this.hasTerminalConflict(turn, false)) ||
+      turn.steersInFlight > 0 ||
+      turn.terminalizing
+    ) {
+      turn.deferredAgentEnd = candidate;
+      return;
+    }
+    this.beginTerminalization(turn, candidate);
   }
 
   private projectUserEcho(turn: ActiveTurn, message: OmpMessage): void {
@@ -3232,7 +3245,9 @@ export class OmpProviderSession implements OmpOpenedSession {
       return;
     }
     if (state) {
-      if (state.isStreaming || state.isCompacting) {
+      // A run start buffered behind this check proves this end was the last one before it, so a
+      // streaming state belongs to that new run, not to this turn.
+      if ((state.isStreaming || state.isCompacting) && !this.runStartBacklog) {
         this.ignoreActiveTerminalCandidate(turn, candidate);
         return;
       }
