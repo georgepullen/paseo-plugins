@@ -12,7 +12,7 @@ export type PendingUser = {
 type TerminalCorrelationEvidence = "fresh-native-user" | "current-assistant";
 
 type TerminalCorrelation = {
-  policy: "initial-turn" | "ordered-legacy" | "native-command";
+  policy: "initial-turn" | "ordered-legacy" | "native-command" | "native-run";
   evidence: Map<TerminalCorrelationEvidence, number>;
 };
 
@@ -24,6 +24,7 @@ export type TerminalCandidate = {
     | "initial-turn"
     | "ordered-legacy"
     | "native-command"
+    | "native-run"
     | "interrupted"
     | "ambiguous";
 };
@@ -69,6 +70,7 @@ export type ActiveTurn = {
   steerReady: VoidDeferred;
   steersInFlight: number;
   deferredAgentEnd?: TerminalCandidate;
+  heldAgentEnd?: HeldAgentEnd;
   activeToolCallIds: Set<string>;
   bufferedEvents: OmpRpcEvent[];
   pendingUsers: PendingUser[];
@@ -81,6 +83,37 @@ export type ActiveTurn = {
   lastCompletedAssistantOutcome?: AgentEndOutcome;
   lastCompletedAssistantEntryId?: string;
 };
+
+type RunEvidence = Pick<
+  ActiveTurn,
+  | "completedMessageCount"
+  | "streamedMessageEntryIds"
+  | "streamedMessageIdentityComplete"
+  | "lastCompletedAssistantOutcome"
+  | "lastCompletedAssistantEntryId"
+>;
+
+/** A run that ended with `isTerminal: false`, kept until another run starts or OMP settles. */
+export type HeldAgentEnd = {
+  event: Extract<OmpRpcEvent, { type: "agent_end" }>;
+  evidence: RunEvidence;
+};
+
+/** Hands over the evidence of the run that just ended and starts the next run's evidence empty. */
+export function takeRunEvidence(turn: ActiveTurn): RunEvidence {
+  const evidence: RunEvidence = {
+    completedMessageCount: turn.completedMessageCount,
+    streamedMessageEntryIds: turn.streamedMessageEntryIds.splice(0),
+    streamedMessageIdentityComplete: turn.streamedMessageIdentityComplete,
+    lastCompletedAssistantOutcome: turn.lastCompletedAssistantOutcome,
+    lastCompletedAssistantEntryId: turn.lastCompletedAssistantEntryId,
+  };
+  turn.completedMessageCount = 0;
+  turn.streamedMessageIdentityComplete = true;
+  turn.lastCompletedAssistantOutcome = undefined;
+  turn.lastCompletedAssistantEntryId = undefined;
+  return evidence;
+}
 
 export type VoidDeferred = {
   promise: Promise<void>;
@@ -276,6 +309,15 @@ export function createActiveTurn(
     ],
   };
 }
+/** A run OMP started without a client prompt: an extension, goal, or background wake. */
+export function createNativeRunTurn(generation: number): ActiveTurn {
+  return {
+    ...createActiveTurn("", "", generation, "native-run"),
+    promptResultEmitted: true,
+    pendingUsers: [],
+  };
+}
+
 export function classifyTerminalCandidate(
   turn: ActiveTurn,
   event: Extract<OmpRpcEvent, { type: "agent_end" }>,
@@ -285,6 +327,9 @@ export function classifyTerminalCandidate(
   if (turn.agentInvoked === false) return { event, confidence: "ambiguous", arrivalSequence };
   if (turn.terminalCorrelation.policy === "initial-turn") {
     return { event, confidence: "initial-turn", arrivalSequence };
+  }
+  if (turn.terminalCorrelation.policy === "native-run") {
+    return { event, confidence: "native-run", arrivalSequence };
   }
   const assistantSequence = turn.terminalCorrelation.evidence.get("current-assistant");
   if (

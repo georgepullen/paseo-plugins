@@ -384,7 +384,7 @@ describe("OMP RPC transport", () => {
     await session.close();
   });
 
-  test("ignores the session_settled frame without a protocol violation", async () => {
+  test("forwards the session_settled frame without a protocol violation", async () => {
     const child = new FakeRpcChild();
     const diagnostics: OmpProtocolViolationDiagnostic[] = [];
     observeCommands(child, (command) => {
@@ -408,7 +408,7 @@ describe("OMP RPC transport", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(events).toEqual([]);
+    expect(events).toEqual([{ type: "session_settled" }]);
     expect(diagnostics).toEqual([]);
     await session.close();
   });
