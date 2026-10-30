@@ -657,7 +657,7 @@ describe("OMP direct provider", () => {
     await connection.close();
   });
 
-  test("fails closed after one-turn native identity saturation and recovers next turn", async () => {
+  test("keeps rendering past 1,024 native identities in one turn and in the next", async () => {
     const { connection, events, runtime, scheduler } = await createHarness();
     await openSession(connection, events);
     const session = sessionAt(runtime);
@@ -685,7 +685,7 @@ describe("OMP direct provider", () => {
       events.filter(
         (event) => event.type === "timeline.item" && event.item.type === "assistant_message",
       ),
-    ).toHaveLength(1_024);
+    ).toHaveLength(1_025);
     await finishTurn(events, session, firstTurn);
 
     const nextTurn = turnIdFrom(
