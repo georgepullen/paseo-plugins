@@ -146,6 +146,50 @@ function hasTurnId(event: AgentStreamEvent, turnId: string): boolean {
 
 type TurnRun = { turnId: string; events: AgentStreamEvent[] };
 
+async function within<T>(promise: Promise<T>, label: string): Promise<T> {
+  const timeout = Promise.withResolvers<never>();
+  const timer = setTimeout(
+    () => timeout.reject(new Error(`Timed out waiting for ${label}`)),
+    5_000,
+  );
+  try {
+    return await Promise.race([promise, timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Starts a prompted turn, waits for it to finish, then for the run OMP starts on its own. */
+async function promptedThenNativeTurn(
+  session: AgentSession,
+  events: EventLog,
+  prompt: string,
+): Promise<{ promptedTurnId: string; nativeTurnId: string }> {
+  const { turnId: promptedTurnId } = await session.startTurn(prompt, { clientMessageId: prompt });
+  await within(
+    events.waitFor((event) => isTerminal(event) && hasTurnId(event, promptedTurnId)),
+    "the prompted turn to finish",
+  );
+  const started = await within(
+    events.waitFor((event) => event.type === "turn_started" && !hasTurnId(event, promptedTurnId)),
+    "the self-started run's turn",
+  );
+  if (started.type !== "turn_started" || !started.turnId) throw new Error("Expected a turn id");
+  return { promptedTurnId, nativeTurnId: started.turnId };
+}
+
+function assistantText(events: AgentStreamEvent[], turnId: string): string {
+  return events
+    .flatMap((event) =>
+      event.type === "timeline" &&
+      hasTurnId(event, turnId) &&
+      event.item.type === "assistant_message"
+        ? [event.item.text]
+        : [],
+    )
+    .join("");
+}
+
 async function runTurn(
   session: AgentSession,
   prompt: AgentPromptInput,
@@ -998,6 +1042,175 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
           expect.objectContaining({ type: "steer", message: "focus now" }),
         );
         expect(commands.filter((command) => command.type === "abort")).toHaveLength(1);
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await session?.close();
+      await harness.close();
+    }
+  });
+
+  test("shows a run OMP starts on its own right after a turn, during the final usage sample", async () => {
+    const harness = await createHarness();
+    let session: AgentSession | undefined;
+    try {
+      // The resume lands 50 ms after the terminal agent_end, inside the 150 ms final usage sample.
+      session = await harness.client.createSession(
+        harness.config(),
+        harness.launchEnv({ PASEO_OMP_FAKE_STATS_DELAY_MS: "150" }),
+        { persistSession: false },
+      );
+      const events = new EventLog();
+      const unsubscribe = session.subscribe((event) => events.push(event));
+      try {
+        const { promptedTurnId, nativeTurnId } = await promptedThenNativeTurn(
+          session,
+          events,
+          "CONTRACT_AUTO_RESUME",
+        );
+        const terminal = await within(
+          events.waitFor((event) => isTerminal(event) && hasTurnId(event, nativeTurnId)),
+          "the self-started run to finish",
+        );
+        expect(terminal.type).toBe("turn_completed");
+        expect(assistantText(events, promptedTurnId)).toBe("FAKE_OK");
+        expect(assistantText(events, nativeTurnId)).toBe("AUTO_RESUMED");
+        expect(events.filter(isTerminal)).toHaveLength(2);
+        expect(
+          (await loggedCommands(harness)).filter((command) => command.type === "prompt"),
+        ).toHaveLength(1);
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await session?.close();
+      await harness.close();
+    }
+  });
+
+  test("shows a late background wake after the turn and OMP settled", async () => {
+    const harness = await createHarness();
+    let session: AgentSession | undefined;
+    try {
+      session = await harness.client.createSession(harness.config(), harness.launchEnv(), {
+        persistSession: false,
+      });
+      const events = new EventLog();
+      const unsubscribe = session.subscribe((event) => events.push(event));
+      try {
+        const { nativeTurnId } = await promptedThenNativeTurn(
+          session,
+          events,
+          "CONTRACT_LATE_WAKE",
+        );
+        const terminal = await within(
+          events.waitFor((event) => isTerminal(event) && hasTurnId(event, nativeTurnId)),
+          "the wake to finish",
+        );
+        expect(terminal.type).toBe("turn_completed");
+        expect(assistantText(events, nativeTurnId)).toBe("LATE_WAKE_OK");
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await session?.close();
+      await harness.close();
+    }
+  });
+
+  test("finishes a turn held by a nonterminal agent_end when OMP settles with no further run", async () => {
+    const harness = await createHarness();
+    let session: AgentSession | undefined;
+    try {
+      session = await harness.client.createSession(harness.config(), harness.launchEnv(), {
+        persistSession: false,
+      });
+      const events = new EventLog();
+      const unsubscribe = session.subscribe((event) => events.push(event));
+      try {
+        const { turnId } = await session.startTurn("CONTRACT_SETTLE_HOLD", {
+          clientMessageId: "settle-hold",
+        });
+        const terminal = await within(
+          events.waitFor((event) => isTerminal(event) && hasTurnId(event, turnId)),
+          "the held turn to finish",
+        );
+        expect(terminal.type).toBe("turn_completed");
+        expect(assistantText(events, turnId)).toBe("HELD_OK");
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await session?.close();
+      await harness.close();
+    }
+  });
+
+  test("steers a prompt into a run OMP started on its own", async () => {
+    const harness = await createHarness();
+    let session: AgentSession | undefined;
+    try {
+      session = await harness.client.createSession(harness.config(), harness.launchEnv(), {
+        persistSession: false,
+      });
+      const events = new EventLog();
+      const unsubscribe = session.subscribe((event) => events.push(event));
+      try {
+        const { nativeTurnId } = await promptedThenNativeTurn(
+          session,
+          events,
+          "CONTRACT_NATIVE_HOLD",
+        );
+        await expect(
+          session.startTurn("look at the logs", { clientMessageId: "into-native" }),
+        ).resolves.toEqual({ turnId: nativeTurnId });
+        const terminal = await within(
+          events.waitFor((event) => isTerminal(event) && hasTurnId(event, nativeTurnId)),
+          "the steered run to finish",
+        );
+        expect(terminal.type).toBe("turn_completed");
+        expect(assistantText(events, nativeTurnId)).toContain("NATIVE_STEERED");
+        const commands = await loggedCommands(harness);
+        expect(commands).toContainEqual(
+          expect.objectContaining({ type: "steer", message: "look at the logs" }),
+        );
+        expect(commands.filter((command) => command.type === "prompt")).toHaveLength(1);
+      } finally {
+        unsubscribe();
+      }
+    } finally {
+      await session?.close();
+      await harness.close();
+    }
+  });
+
+  test("interrupts a run OMP started on its own", async () => {
+    const harness = await createHarness();
+    let session: AgentSession | undefined;
+    try {
+      session = await harness.client.createSession(harness.config(), harness.launchEnv(), {
+        persistSession: false,
+      });
+      const events = new EventLog();
+      const unsubscribe = session.subscribe((event) => events.push(event));
+      try {
+        const { nativeTurnId } = await promptedThenNativeTurn(
+          session,
+          events,
+          "CONTRACT_NATIVE_HOLD",
+        );
+        await session.interrupt();
+        await within(
+          events.waitFor((event) => isTerminal(event) && hasTurnId(event, nativeTurnId)),
+          "the interrupted run to finish",
+        );
+        expect(
+          events.filter((event) => isTerminal(event) && hasTurnId(event, nativeTurnId)),
+        ).toEqual([expect.objectContaining({ type: "turn_canceled" })]);
+        expect(
+          (await loggedCommands(harness)).filter((command) => command.type === "abort"),
+        ).toHaveLength(1);
       } finally {
         unsubscribe();
       }

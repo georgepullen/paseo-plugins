@@ -1997,6 +1997,7 @@ export function parseOmpHostToolAgentResult(value: unknown): OmpHostToolResult["
 export type OmpRpcEvent =
   | z.infer<typeof OmpRuntimeEventSchema>
   | { type: "prompt_error"; id: string; error: string; code?: string }
+  | { type: "session_settled" }
   | { type: "process_exit"; error: string };
 export type OmpAgentSessionEvent = z.infer<typeof OmpAgentSessionEventSchema>;
 export type OmpSubagentSnapshot = z.infer<typeof OmpSubagentsResultSchema>["subagents"][number];

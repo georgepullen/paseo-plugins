@@ -1090,8 +1090,11 @@ export class OmpRpcProcess {
       });
       return;
     }
-    // Emitted once the session has no live or background work. Nothing consumes it yet.
-    if (type === "session_settled") return;
+    // Emitted when the session is quiet: nothing live, queued, or pending in the background.
+    if (type === "session_settled") {
+      this.emit({ type: "session_settled" });
+      return;
+    }
     if (type === "ready") {
       if (this.readyReceived) {
         this.recordProtocolViolation("duplicate-ready", {

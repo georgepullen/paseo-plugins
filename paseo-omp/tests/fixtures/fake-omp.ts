@@ -52,6 +52,7 @@ let thinkingLevel = thinkingIndex >= 0 ? (args[thinkingIndex + 1] ?? "medium") :
 let autoCompactionEnabled = true;
 let activeScenario:
   | "hold"
+  | "native-hold"
   | "typed-permission"
   | "fallback-permission"
   | "typed-cancel"
@@ -69,6 +70,8 @@ let history = [
 const typedApprovals = process.env.PASEO_OMP_FAKE_TYPED_APPROVALS !== "0";
 const logPath = process.env.PASEO_OMP_FAKE_LOG;
 const secret = process.env.PASEO_OMP_FAKE_SECRET ?? "fake-secret-not-configured";
+// Delays the final usage sample a turn takes before it publishes its terminal state.
+const statsDelayMs = Number(process.env.PASEO_OMP_FAKE_STATS_DELAY_MS ?? "0");
 
 function record(value: unknown): void {
   if (!logPath) return;
@@ -136,6 +139,39 @@ function emitBasicPrompt(message: string): void {
     message: { role: "user", content: message, entryId },
   });
   finish("FAKE_OK", message.startsWith("SOAK_"));
+}
+
+/**
+ * A run OMP starts without a client prompt, as autoresearch resume, goal continuation, and
+ * async job or IRC wakes do: a hidden custom message, then the agent's reply.
+ */
+function startNativeRun(customType: string): void {
+  send({ type: "agent_start" });
+  send({ type: "turn_start" });
+  send({
+    type: "message_end",
+    message: {
+      role: "custom",
+      id: `${customType}-${promptSequence}`,
+      customType,
+      display: false,
+      content: "continue",
+    },
+  });
+}
+
+function finishNativeRun(text: string): void {
+  const message = assistant(text, `native-${text}`);
+  send({ type: "message_end", message });
+  send({ type: "turn_end" });
+  send({ type: "agent_end", messages: [message], isTerminal: true });
+  send({ type: "session_settled" });
+  activeScenario = null;
+}
+
+function emitNativeRun(customType: string, text: string): void {
+  startNativeRun(customType);
+  finishNativeRun(text);
 }
 
 function emitFullContract(message: string): void {
@@ -424,6 +460,32 @@ function handlePrompt(command: Record<string, unknown>): void {
           type: "message_end",
           message: { role: "user", content: message, entryId: `user-hold-${promptSequence}` },
         });
+      } else if (message.includes("CONTRACT_AUTO_RESUME")) {
+        emitBasicPrompt(message);
+        setTimeout(() => emitNativeRun("autoresearch-resume", "AUTO_RESUMED"), 50);
+      } else if (message.includes("CONTRACT_LATE_WAKE")) {
+        emitBasicPrompt(message);
+        send({ type: "session_settled" });
+        setTimeout(() => emitNativeRun("async-result", "LATE_WAKE_OK"), 1_000);
+      } else if (message.includes("CONTRACT_NATIVE_HOLD")) {
+        emitBasicPrompt(message);
+        setTimeout(() => {
+          activeScenario = "native-hold";
+          startNativeRun("goal-continuation");
+        }, 50);
+      } else if (message.includes("CONTRACT_SETTLE_HOLD")) {
+        send({ type: "agent_start" });
+        send({ type: "turn_start" });
+        send({
+          type: "message_end",
+          message: { role: "user", content: message, entryId: `user-settle-${promptSequence}` },
+        });
+        const held = assistant("HELD_OK");
+        send({ type: "message_end", message: held });
+        send({ type: "turn_end" });
+        // The run waits on a background job whose delivery is then cancelled: no run follows.
+        send({ type: "agent_end", messages: [held], isTerminal: false, awaitingAsyncWork: true });
+        setTimeout(() => send({ type: "session_settled" }), 25);
       } else if (message.includes("CONTRACT_CHILD")) {
         emitChildContract(message);
       } else if (message.includes("CONTRACT_LARGE")) {
@@ -491,13 +553,17 @@ reader.on("line", (line) => {
         contextUsage: { tokens: 1_234, contextWindow: currentModel.contextWindow, percent: 1 },
       });
       break;
-    case "get_session_stats":
-      respond(command, {
-        tokens: { input: 900, output: 120, cacheRead: 200 },
-        cost: 0.42,
-        contextUsage: { tokens: 1_234, contextWindow: currentModel.contextWindow, percent: 1 },
-      });
+    case "get_session_stats": {
+      const respondStats = () =>
+        respond(command, {
+          tokens: { input: 900, output: 120, cacheRead: 200 },
+          cost: 0.42,
+          contextUsage: { tokens: 1_234, contextWindow: currentModel.contextWindow, percent: 1 },
+        });
+      if (statsDelayMs > 0) setTimeout(respondStats, statsDelayMs);
+      else respondStats();
       break;
+    }
     case "get_messages_page": {
       const offset =
         typeof command.cursor === "string" && /^\d+$/u.test(command.cursor)
@@ -613,6 +679,7 @@ reader.on("line", (line) => {
         message: { role: "user", content: command.message, entryId: "user-steer" },
       });
       send({ type: "message_end", message: assistant("STEERED") });
+      if (activeScenario === "native-hold") setTimeout(() => finishNativeRun("NATIVE_STEERED"), 10);
       break;
     case "abort":
       respond(command);

@@ -73,10 +73,13 @@ import {
   assistantTerminalOutcome,
   classifyTerminalCandidate,
   createActiveTurn,
+  createNativeRunTurn,
+  type HeldAgentEnd,
   historyTerminalOutcome,
   nativeEntryId,
   type PendingUser,
   type TerminalCandidate,
+  takeRunEvidence,
   terminalOutcome,
   unknownTerminalOutcomeError,
 } from "./session-terminal";
@@ -330,6 +333,8 @@ export class OmpProviderSession implements OmpOpenedSession {
   private configRevision = 0;
   private recoveryUsesNativeConfig = false;
   private activeAbort: PendingAbort | null = null;
+  /** Frames of a run that started while the previous terminal was being confirmed or published. */
+  private runStartBacklog: OmpRpcEvent[] | null = null;
   private readonly usage: OmpSessionUsage;
   private readonly compaction: OmpSessionCompaction;
   private revertInFlight = false;
@@ -1467,24 +1472,31 @@ export class OmpProviderSession implements OmpOpenedSession {
   }
 
   async canStopRuntime(): Promise<boolean> {
-    const hasLocalWork =
-      this.closed ||
-      this.runtimeDead !== null ||
-      this.recoveryPromise !== null ||
-      this.activeTurn !== null ||
-      this.activeAbort !== null ||
-      this.revertInFlight ||
-      this.configMutationInFlight ||
-      this.permissions.hasPending() ||
-      Boolean(this.subsessions?.hasActiveChildren());
-    if (hasLocalWork) return false;
+    if (this.hasLocalRuntimeWork()) return false;
     const state = await this.runtime.getState();
+    // OMP can start a run of its own while the state lookup is pending.
+    if (this.hasLocalRuntimeWork()) return false;
     // OMP builds that predate these fields report neither, which keeps the runtime alive.
     return (
       state.isSettled === true &&
       state.hasPendingAsyncWork === false &&
       !state.isStreaming &&
       !state.isCompacting
+    );
+  }
+
+  private hasLocalRuntimeWork(): boolean {
+    return (
+      this.closed ||
+      this.runtimeDead !== null ||
+      this.recoveryPromise !== null ||
+      this.activeTurn !== null ||
+      this.runStartBacklog !== null ||
+      this.activeAbort !== null ||
+      this.revertInFlight ||
+      this.configMutationInFlight ||
+      this.permissions.hasPending() ||
+      Boolean(this.subsessions?.hasActiveChildren())
     );
   }
 
@@ -2259,6 +2271,17 @@ export class OmpProviderSession implements OmpOpenedSession {
 
   private handleRuntimeEvent(event: OmpRpcEvent): void {
     if (this.closed) return;
+    if (this.runStartBacklog) {
+      this.bufferEvent(this.runStartBacklog, event);
+      return;
+    }
+    // A run that starts while the previous terminal is being confirmed or published waits for it,
+    // so neither the old turn's outcome nor the new run's frames are lost.
+    const pendingTerminal = this.activeTurn?.terminalization ?? this.activeTurn?.agentEndCheck;
+    if (event.type === "agent_start" && pendingTerminal) {
+      this.deferRunStart(event, pendingTerminal);
+      return;
+    }
     if (
       event.type === "subagent_lifecycle" ||
       event.type === "subagent_progress" ||
@@ -2371,7 +2394,8 @@ export class OmpProviderSession implements OmpOpenedSession {
       this.scheduleCommittedConfigRefresh();
       return;
     }
-    const turn = this.activeTurn;
+    const turn =
+      this.activeTurn ?? (event.type === "agent_start" ? this.openNativeRunTurn() : null);
     if (!turn) {
       if (event.type === "auto_compaction_start" || event.type === "auto_compaction_end") {
         this.projector.projectPassive(event);
@@ -2386,25 +2410,67 @@ export class OmpProviderSession implements OmpOpenedSession {
       return;
     }
     if (turn.starting) {
-      if (
-        turn.bufferedEvents.length >= MAX_BUFFERED_TURN_EVENTS ||
-        retainedBytes(turn.bufferedEvents, MAX_BUFFERED_TURN_BYTES) +
-          boundedJsonBytes(
-            event,
-            MAX_BUFFERED_TURN_BYTES,
-            MAX_BUFFERED_VALUE_ITEMS,
-            MAX_BUFFERED_TURN_BYTES,
-            MAX_BUFFERED_VALUE_NODES,
-          ) >
-          MAX_BUFFERED_TURN_BYTES
-      ) {
-        this.handleRuntimeFailure();
-        return;
-      }
-      turn.bufferedEvents.push(event);
+      this.bufferEvent(turn.bufferedEvents, event);
       return;
     }
     this.handleTurnEvent(turn, event);
+  }
+
+  private bufferEvent(buffer: OmpRpcEvent[], event: OmpRpcEvent): void {
+    if (
+      buffer.length >= MAX_BUFFERED_TURN_EVENTS ||
+      retainedBytes(buffer, MAX_BUFFERED_TURN_BYTES) +
+        boundedJsonBytes(
+          event,
+          MAX_BUFFERED_TURN_BYTES,
+          MAX_BUFFERED_VALUE_ITEMS,
+          MAX_BUFFERED_TURN_BYTES,
+          MAX_BUFFERED_VALUE_NODES,
+        ) >
+        MAX_BUFFERED_TURN_BYTES
+    ) {
+      this.handleRuntimeFailure();
+      return;
+    }
+    buffer.push(event);
+  }
+
+  private deferRunStart(event: OmpRpcEvent, pendingTerminal: Promise<void>): void {
+    const backlog = [event];
+    this.runStartBacklog = backlog;
+    const replay = () => {
+      if (this.runStartBacklog !== backlog) return;
+      this.runStartBacklog = null;
+      for (const buffered of backlog) this.handleRuntimeEvent(buffered);
+    };
+    void pendingTerminal.then(replay, replay);
+  }
+
+  private scheduleHeldTurnCheck(turn: ActiveTurn, held: HeldAgentEnd): void {
+    this.scheduler.set(() => this.checkHeldTurn(turn, held), USAGE_POLL_MS);
+  }
+
+  /** Released OMP does not always write `session_settled` once a held run's async work is gone. */
+  private async checkHeldTurn(turn: ActiveTurn, held: HeldAgentEnd): Promise<void> {
+    if (turn.heldAgentEnd !== held || this.activeTurn !== turn) return;
+    const state = await this.usage.boundedSnapshot(turn, FINAL_USAGE_WAIT_MS);
+    if (turn.heldAgentEnd !== held || this.activeTurn !== turn) return;
+    const settled =
+      state?.isSettled === true &&
+      state.hasPendingAsyncWork === false &&
+      !state.isStreaming &&
+      !state.isCompacting;
+    if (settled) this.handleTurnEvent(turn, { type: "session_settled" });
+    else this.scheduleHeldTurnCheck(turn, held);
+  }
+
+  private openNativeRunTurn(): ActiveTurn {
+    const turn = createNativeRunTurn(this.generation);
+    this.activeTurn = turn;
+    turn.acknowledged = true;
+    this.startTurn(turn);
+    this.projector.acceptLiveTurn(turn.turnId);
+    return turn;
   }
 
   private handleTurnEvent(
@@ -2482,6 +2548,16 @@ export class OmpProviderSession implements OmpOpenedSession {
       }
       return;
     }
+    if (event.type === "session_settled") {
+      // OMP is quiet, so the held end closes this stretch; a later run opens its own turn.
+      const held = turn.heldAgentEnd;
+      if (!held) return;
+      turn.heldAgentEnd = undefined;
+      Object.assign(turn, held.evidence);
+      // Ownership is judged as of the held end's arrival, never from evidence that came later.
+      this.acceptTerminal(turn, { ...held.event, isTerminal: true }, held.arrivalSequence);
+      return;
+    }
     if (event.type === "agent_end" && turn.manualCompactionPending) return;
     if (event.type === "tool_execution_start") turn.activeToolCallIds.add(event.toolCallId);
     if (event.type === "tool_execution_end") {
@@ -2502,35 +2578,30 @@ export class OmpProviderSession implements OmpOpenedSession {
         return;
       }
     }
+    if (event.type === "agent_start") {
+      turn.heldAgentEnd = undefined;
+      // Evidence is per run; records OMP writes between runs belong to neither.
+      takeRunEvidence(turn);
+      if (turn.agentEndPending && !turn.interrupted) {
+        // A terminal waiting to retry its idle check is stale once another run starts.
+        this.resetAgentEndProbe(turn);
+        turn.deferredAgentEnd = undefined;
+        this.usage.poll(turn);
+      }
+    }
     if (event.type === "agent_end") {
       if (event.isTerminal === false) {
-        turn.completedMessageCount = 0;
-        turn.streamedMessageEntryIds.length = 0;
-        turn.streamedMessageIdentityComplete = true;
-        turn.lastCompletedAssistantOutcome = undefined;
-        turn.lastCompletedAssistantEntryId = undefined;
+        const held = {
+          event,
+          arrivalSequence: turn.activitySequence,
+          evidence: takeRunEvidence(turn),
+        };
+        turn.heldAgentEnd = held;
+        this.scheduleHeldTurnCheck(turn, held);
         return;
       }
-      const candidate: TerminalCandidate = turn.interrupted
-        ? { event, confidence: "interrupted", arrivalSequence: turn.activitySequence }
-        : classifyTerminalCandidate(turn, event);
-      if (candidate.confidence === "ambiguous") {
-        this.deferAmbiguousTerminal(turn, candidate);
-        return;
-      }
-      turn.nativeActivity = true;
-      this.cancelLocalOnlyCompletion(turn);
-      if (
-        (!turn.interrupted &&
-          candidate.confidence !== "keyed" &&
-          this.hasTerminalConflict(turn, false)) ||
-        turn.steersInFlight > 0 ||
-        turn.terminalizing
-      ) {
-        turn.deferredAgentEnd = candidate;
-        return;
-      }
-      this.beginTerminalization(turn, candidate);
+      turn.heldAgentEnd = undefined;
+      this.acceptTerminal(turn, event, turn.activitySequence);
       return;
     }
     if (isNativeTurnActivity(event)) {
@@ -2564,6 +2635,33 @@ export class OmpProviderSession implements OmpOpenedSession {
       throw error;
     }
     if (event.type === "tool_execution_end") this.resumeDeferredAgentEnd();
+  }
+
+  private acceptTerminal(
+    turn: ActiveTurn,
+    event: Extract<OmpRpcEvent, { type: "agent_end" }>,
+    arrivalSequence: number,
+  ): void {
+    const candidate: TerminalCandidate = turn.interrupted
+      ? { event, confidence: "interrupted", arrivalSequence }
+      : classifyTerminalCandidate(turn, event, arrivalSequence);
+    if (candidate.confidence === "ambiguous") {
+      this.deferAmbiguousTerminal(turn, candidate);
+      return;
+    }
+    turn.nativeActivity = true;
+    this.cancelLocalOnlyCompletion(turn);
+    if (
+      (!turn.interrupted &&
+        candidate.confidence !== "keyed" &&
+        this.hasTerminalConflict(turn, false)) ||
+      turn.steersInFlight > 0 ||
+      turn.terminalizing
+    ) {
+      turn.deferredAgentEnd = candidate;
+      return;
+    }
+    this.beginTerminalization(turn, candidate);
   }
 
   private projectUserEcho(turn: ActiveTurn, message: OmpMessage): void {
@@ -3033,6 +3131,7 @@ export class OmpProviderSession implements OmpOpenedSession {
       if (!turn.agentEndPending || turn.terminal || this.activeTurn !== turn) return;
       if (
         candidate.confidence === "keyed" ||
+        candidate.confidence === "native-run" ||
         (candidate.confidence === "initial-turn" && !turn.userEchoObserved)
       ) {
         void this.completeAgentEnd(turn, candidate.event);
@@ -3146,14 +3245,16 @@ export class OmpProviderSession implements OmpOpenedSession {
       return;
     }
     if (state) {
-      if (state.isStreaming || state.isCompacting) {
+      // A run start buffered behind this check proves this end was the last one before it, so a
+      // streaming state belongs to that new run, not to this turn.
+      if ((state.isStreaming || state.isCompacting) && !this.runStartBacklog) {
         this.ignoreActiveTerminalCandidate(turn, candidate);
         return;
       }
       await this.completeAgentEnd(turn, candidate.event, true);
       return;
     }
-    if (turn.userEchoObserved) {
+    if (turn.userEchoObserved && candidate.confidence !== "native-run") {
       await this.cancelIndeterminateTerminal(
         turn,
         "OMP agent_end state could not be confirmed",
@@ -3389,6 +3490,7 @@ export class OmpProviderSession implements OmpOpenedSession {
         throw error;
       }
       this.unclaimedBranchEntries.length = 0;
+      turn.terminalEmitAttempted = true;
       this.emit({
         type: "session.turn",
         sessionId: this.id,
@@ -3398,9 +3500,33 @@ export class OmpProviderSession implements OmpOpenedSession {
       });
       this.runtimeTurnCompleted = true;
       if (this.activeTurn === turn) this.activeTurn = null;
-    })();
+    })().catch(() => this.failTerminalization(turn));
     turn.terminalization = terminalization;
     return terminalization;
+  }
+
+  /** A turn whose terminal state could not be published must not keep owning the session. */
+  private failTerminalization(turn: ActiveTurn): void {
+    const message = "OMP turn could not be finalized";
+    turn.terminal = true;
+    if (this.activeTurn === turn) this.activeTurn = null;
+    this.recordOperationalFailure({ category: "terminal-outcome", stage: "failed" });
+    // Once the terminal emit was attempted, earlier listeners may already hold it; a second,
+    // conflicting terminal would be worse than failing the runtime alone.
+    if (!turn.terminalEmitAttempted) {
+      try {
+        this.emit({
+          type: "session.turn",
+          sessionId: this.id,
+          turnId: turn.turnId,
+          state: "failed",
+          error: { message },
+        });
+      } catch {
+        // The listener that failed may fail again; the runtime failure below still applies.
+      }
+    }
+    this.handleRuntimeFailure(message);
   }
 
   private invalidateRuntime(
@@ -3409,6 +3535,7 @@ export class OmpProviderSession implements OmpOpenedSession {
   ): void {
     this.imageMaterializer.clear();
     if (this.closed || this.runtimeDead) return;
+    this.runStartBacklog = null;
     this.compaction.resetDiscardedEnds();
     this.permissions.resolveAllPermissions();
     this.recoveryUsesNativeConfig ||=
