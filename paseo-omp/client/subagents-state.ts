@@ -46,6 +46,13 @@ export function subagentRequestError(cause: unknown): string {
   return "The OMP subagent request failed";
 }
 
+/** The one line under the list: the last outcome, or the open draft's error. */
+export function subagentStatusNotice(state: SubagentPanelState): SubagentNotice | null {
+  if (state.kind === "idle") return state.notice;
+  if (state.kind === "steering" && state.error) return { tone: "error", message: state.error };
+  return null;
+}
+
 export function isSubagentRequestPending(
   state: SubagentPanelState,
 ): state is Extract<SubagentPanelState, { kind: "cancelling" | "sending" }> {

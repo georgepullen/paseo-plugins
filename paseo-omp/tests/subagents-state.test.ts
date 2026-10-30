@@ -8,6 +8,7 @@ import {
   steerDraftProblem,
   subagentPanelReducer,
   subagentRequestError,
+  subagentStatusNotice,
 } from "../client/subagents-state";
 import {
   cancelOmpSubagent,
@@ -87,6 +88,34 @@ describe("OMP subagent panel state", () => {
       draft: "Focus on the parser",
       error: "This subagent is no longer running",
     });
+  });
+
+  test("shows one status line for the last outcome or the open draft's error", () => {
+    expect(subagentStatusNotice(INITIAL_SUBAGENT_PANEL_STATE)).toBeNull();
+    const failed = run(
+      { type: "start-steer", subagent: CHILD },
+      { type: "edit-draft", draft: "focus" },
+      { type: "submit" },
+      { type: "failed", message: "OMP did not accept the message" },
+    );
+    expect(subagentStatusNotice(failed)).toEqual({
+      tone: "error",
+      message: "OMP did not accept the message",
+    });
+    expect(subagentStatusNotice(subagentPanelReducer(failed, { type: "submit" }))).toBeNull();
+    expect(
+      subagentStatusNotice(
+        run(
+          { type: "request-cancel", subagent: CHILD },
+          { type: "submit" },
+          {
+            type: "cancelled",
+            cancelled: true,
+          },
+        ),
+      ),
+    ).toEqual({ tone: "success", message: "Subagent cancelled" });
+    expect(subagentStatusNotice(run({ type: "request-cancel", subagent: CHILD }))).toBeNull();
   });
 
   test("shows the handler's message without transport details", () => {

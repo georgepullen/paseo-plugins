@@ -21,11 +21,11 @@ import {
   INITIAL_SUBAGENT_PANEL_STATE,
   isSubagentRequestPending,
   requestedSubmission,
-  type SubagentNotice,
   type SubagentPanelAction,
   type SubagentPanelState,
   subagentPanelReducer,
   subagentRequestError,
+  subagentStatusNotice,
 } from "./subagents-state";
 
 const SUBAGENT_POLL_MS = 2_000;
@@ -37,8 +37,10 @@ function createStyles(theme: Theme, compact: boolean) {
     root: { gap: compact ? 8 : 10, width: compact ? undefined : 380 },
     title: { color: theme.colors.foreground, fontSize: 14, fontWeight: "700" as const },
     muted: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 },
-    error: { color: theme.colors.statusDanger, fontSize: 12 },
-    success: { color: theme.colors.statusSuccess, fontSize: 12 },
+    error: { color: theme.colors.statusDanger, fontSize: 12, lineHeight: 17 },
+    success: { color: theme.colors.statusSuccess, fontSize: 12, lineHeight: 17 },
+    // Reserves two lines so a notice or error never grows the popover.
+    status: { minHeight: 34 },
     card: {
       gap: 6,
       padding: compact ? 10 : 12,
@@ -49,8 +51,15 @@ function createStyles(theme: Theme, compact: boolean) {
     },
     row: { flexDirection: "row" as const, justifyContent: "space-between" as const, gap: 12 },
     name: { color: theme.colors.foreground, fontSize: 14, fontWeight: "600" as const, flex: 1 },
-    status: { color: theme.colors.foregroundMuted, fontSize: 12 },
-    actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 7 },
+    state: { color: theme.colors.foregroundMuted, fontSize: 12 },
+    // Every mode of a row renders inside this fixed slot, so no action changes the popover's
+    // height. The host only re-measures popover content intermittently after it first opens.
+    actions: {
+      flexDirection: "row" as const,
+      alignItems: "center" as const,
+      gap: 7,
+      height: 34,
+    },
     action: {
       paddingHorizontal: 10,
       paddingVertical: 6,
@@ -64,15 +73,15 @@ function createStyles(theme: Theme, compact: boolean) {
     actionText: { color: theme.colors.foreground, fontSize: 12, fontWeight: "600" as const },
     destructiveText: { color: theme.colors.statusDanger },
     input: {
+      flex: 1,
+      height: 32,
       color: theme.colors.foreground,
       borderWidth: 1,
       borderColor: theme.colors.border,
       borderRadius: 8,
       backgroundColor: theme.colors.surface0,
       paddingHorizontal: 10,
-      paddingVertical: 8,
       fontSize: 13,
-      minHeight: 64,
     },
   };
 }
@@ -132,6 +141,10 @@ function SubagentList({ agentId, styles }: { agentId: string; styles: Styles }) 
   return (
     <View style={styles.root}>
       <Text style={styles.title}>OMP subagents</Text>
+      <Text style={styles.muted}>
+        Cancel stops a subagent and its nested subagents; the parent turn continues. A steering
+        message reaches the subagent at its next step.
+      </Text>
       {subagents.isLoading ? <Text style={styles.muted}>Loading subagents...</Text> : null}
       {subagents.error ? (
         <Text style={styles.error}>
@@ -140,7 +153,7 @@ function SubagentList({ agentId, styles }: { agentId: string; styles: Styles }) 
             : "Could not list the OMP subagents"}
         </Text>
       ) : null}
-      {subagents.isSuccess && items.length === 0 ? (
+      {subagents.isSuccess && items.length === 0 && !unlisted ? (
         <Text style={styles.muted}>No running subagents</Text>
       ) : null}
       {items.map((subagent) => (
@@ -164,17 +177,23 @@ function SubagentList({ agentId, styles }: { agentId: string; styles: Styles }) 
           submit={submit}
         />
       ) : null}
-      {state.kind === "idle" && state.notice ? (
-        <NoticeText notice={state.notice} styles={styles} />
-      ) : null}
+      <View style={styles.status}>
+        <StatusText state={state} styles={styles} />
+      </View>
     </View>
   );
 }
 
-function NoticeText({ notice, styles }: { notice: SubagentNotice; styles: Styles }) {
+function StatusText({ state, styles }: { state: SubagentPanelState; styles: Styles }) {
+  const notice = subagentStatusNotice(state);
+  if (!notice) return null;
   const style = { success: styles.success, muted: styles.muted, error: styles.error }[notice.tone];
   return (
-    <Text accessibilityRole={notice.tone === "error" ? "alert" : undefined} style={style}>
+    <Text
+      accessibilityRole={notice.tone === "error" ? "alert" : undefined}
+      numberOfLines={2}
+      style={style}
+    >
       {notice.message}
     </Text>
   );
@@ -182,12 +201,14 @@ function NoticeText({ notice, styles }: { notice: SubagentNotice; styles: Styles
 
 function ActionButton({
   label,
+  accessibilityLabel = label,
   styles,
   disabled = false,
   destructive = false,
   onPress,
 }: {
   label: string;
+  accessibilityLabel?: string;
   styles: Styles;
   disabled?: boolean;
   destructive?: boolean;
@@ -196,7 +217,7 @@ function ActionButton({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={label}
+      accessibilityLabel={accessibilityLabel}
       disabled={disabled}
       onPress={onPress}
       style={[
@@ -210,14 +231,7 @@ function ActionButton({
   );
 }
 
-function SubagentCard({
-  subagent,
-  listed,
-  state,
-  styles,
-  dispatch,
-  submit,
-}: {
+interface CardProps {
   subagent: OmpSubagent;
   /** False keeps the row that owns the current request visible after it leaves the roster. */
   listed: boolean;
@@ -225,17 +239,17 @@ function SubagentCard({
   styles: Styles;
   dispatch: (action: SubagentPanelAction) => void;
   submit(): Promise<void>;
-}) {
-  const live = listed && isLiveOmpSubagentStatus(subagent.status);
-  const pending = isSubagentRequestPending(state);
-  const owner = state.kind !== "idle" && state.subagent.id === subagent.id ? state : null;
+}
+
+function SubagentCard(props: CardProps) {
+  const { subagent, listed, styles } = props;
   return (
     <View style={styles.card}>
       <View style={styles.row}>
         <Text numberOfLines={1} style={styles.name}>
           {subagent.agent}
         </Text>
-        <Text style={styles.status}>{listed ? subagent.status : "no longer running"}</Text>
+        <Text style={styles.state}>{listed ? subagent.status : "no longer running"}</Text>
       </View>
       <Text numberOfLines={1} style={styles.muted}>
         {subagent.name}
@@ -245,83 +259,81 @@ function SubagentCard({
           {subagent.description}
         </Text>
       ) : null}
-      {owner?.kind === "confirming-cancel" || owner?.kind === "cancelling" ? (
-        <View accessibilityRole="alert" style={styles.card}>
-          <Text style={styles.muted}>
-            OMP stops this subagent and its nested subagents. The parent turn continues and receives
-            an aborted result.
-          </Text>
-          <View style={styles.actions}>
-            <ActionButton
-              label={owner.kind === "cancelling" ? "Cancelling..." : "Cancel subagent"}
-              destructive
-              disabled={pending}
-              styles={styles}
-              onPress={() => void submit()}
-            />
-            <ActionButton
-              label="Keep running"
-              disabled={pending}
-              styles={styles}
-              onPress={() => dispatch({ type: "dismiss" })}
-            />
-          </View>
-        </View>
-      ) : null}
-      {owner?.kind === "steering" || owner?.kind === "sending" ? (
-        <View style={styles.card}>
-          <TextInput
-            accessibilityLabel={`Message for ${subagent.agent}`}
-            autoFocus
-            editable={owner.kind === "steering"}
-            maxLength={OMP_SUBAGENT_STEER_MAX_LENGTH}
-            multiline
-            onChangeText={(draft) => dispatch({ type: "edit-draft", draft })}
-            placeholder="Message the subagent receives as its user"
-            placeholderTextColor={styles.muted.color}
-            style={styles.input}
-            value={owner.draft}
-          />
-          <Text style={styles.muted}>
-            The subagent receives this at its next step. Slash commands run in the subagent.
-          </Text>
-          {owner.kind === "steering" && owner.error ? (
-            <Text accessibilityRole="alert" style={styles.error}>
-              {owner.error}
-            </Text>
-          ) : null}
-          <View style={styles.actions}>
-            <ActionButton
-              label={owner.kind === "sending" ? "Sending..." : "Send"}
-              disabled={pending}
-              styles={styles}
-              onPress={() => void submit()}
-            />
-            <ActionButton
-              label="Close"
-              disabled={pending}
-              styles={styles}
-              onPress={() => dispatch({ type: "dismiss" })}
-            />
-          </View>
-        </View>
-      ) : null}
-      {live && !owner ? (
-        <View style={styles.actions}>
-          <ActionButton
-            label="Steer"
-            disabled={pending}
-            styles={styles}
-            onPress={() => dispatch({ type: "start-steer", subagent })}
-          />
-          <ActionButton
-            label="Cancel"
-            disabled={pending}
-            styles={styles}
-            onPress={() => dispatch({ type: "request-cancel", subagent })}
-          />
-        </View>
-      ) : null}
+      <View style={styles.actions}>
+        <CardActions {...props} />
+      </View>
     </View>
+  );
+}
+
+function CardActions({ subagent, listed, state, styles, dispatch, submit }: CardProps) {
+  const pending = isSubagentRequestPending(state);
+  const owner = state.kind !== "idle" && state.subagent.id === subagent.id ? state : null;
+  if (owner?.kind === "confirming-cancel" || owner?.kind === "cancelling") {
+    return (
+      <>
+        <ActionButton
+          label={owner.kind === "cancelling" ? "Cancelling..." : "Cancel subagent"}
+          destructive
+          disabled={pending}
+          styles={styles}
+          onPress={() => void submit()}
+        />
+        <ActionButton
+          label="Keep running"
+          disabled={pending}
+          styles={styles}
+          onPress={() => dispatch({ type: "dismiss" })}
+        />
+      </>
+    );
+  }
+  if (owner?.kind === "steering" || owner?.kind === "sending") {
+    return (
+      <>
+        <TextInput
+          accessibilityLabel={`Message for ${subagent.agent}`}
+          autoFocus
+          editable={owner.kind === "steering"}
+          maxLength={OMP_SUBAGENT_STEER_MAX_LENGTH}
+          onChangeText={(draft) => dispatch({ type: "edit-draft", draft })}
+          onSubmitEditing={() => void submit()}
+          placeholder="Message for the subagent"
+          placeholderTextColor={styles.muted.color}
+          style={styles.input}
+          value={owner.draft}
+        />
+        <ActionButton
+          label={owner.kind === "sending" ? "Sending..." : "Send"}
+          disabled={pending}
+          styles={styles}
+          onPress={() => void submit()}
+        />
+        <ActionButton
+          label="Close"
+          accessibilityLabel="Close steering message"
+          disabled={pending}
+          styles={styles}
+          onPress={() => dispatch({ type: "dismiss" })}
+        />
+      </>
+    );
+  }
+  if (!listed || !isLiveOmpSubagentStatus(subagent.status)) return null;
+  return (
+    <>
+      <ActionButton
+        label="Steer"
+        disabled={pending}
+        styles={styles}
+        onPress={() => dispatch({ type: "start-steer", subagent })}
+      />
+      <ActionButton
+        label="Cancel"
+        disabled={pending}
+        styles={styles}
+        onPress={() => dispatch({ type: "request-cancel", subagent })}
+      />
+    </>
   );
 }
