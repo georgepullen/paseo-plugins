@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { openOmpMcpAuthorizationInPaseoBrowser } from "../shared/mcp";
+import { MAX_SESSIONS_UPPER_BOUND } from "../shared/provider-launch-settings";
 import { OmpPublicError } from "./provider/security";
 
-const MAX_REGISTERED_SESSIONS = 32;
+// One registration per live session. The shared session limit refuses sessions first.
+const MAX_REGISTERED_SESSIONS = MAX_SESSIONS_UPPER_BOUND;
 const MAX_AUTHORIZATIONS_PER_SESSION = 16;
 
 type BrowserAuthorizationOpener = (url: string) => Promise<void>;

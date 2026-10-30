@@ -58,10 +58,10 @@ describe("OMP browser authorization registry", () => {
     const registry = new OmpBrowserAuthorizationRegistry();
     const first = registry.register("agent-0", async () => {});
     expect(() => registry.register("agent-0", async () => {})).toThrow("already registered");
-    for (let index = 1; index < 32; index += 1) {
+    for (let index = 1; index < 64; index += 1) {
       registry.register(`agent-${index}`, async () => {});
     }
-    expect(() => registry.register("agent-32", async () => {})).toThrow("session limit");
+    expect(() => registry.register("agent-64", async () => {})).toThrow("session limit");
     first.remove();
     expect(first.issue("https://auth.example.test/stale")).toBeUndefined();
   });

@@ -1,15 +1,20 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, onTestFinished, test } from "vitest";
+import type { ProviderConnection } from "@getpaseo/plugin/server/provider";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
+import { OmpBrowserAuthorizationRegistry } from "../server/mcp-browser";
 import { OmpRpcRuntime } from "../server/provider/omp-rpc";
 import { createOmpProvider } from "../server/provider/registration";
+import { OmpCleanupFailure } from "../server/provider/security";
+import { OmpSessionLimit } from "../server/provider/session-limit";
 import {
   createHarness,
   EventLog,
   FakeOmpRuntime,
   finishTurn,
   MODEL,
+  NATIVE_SESSION_ID,
   openSession,
   ProviderRpcChild,
   sessionAt,
@@ -17,6 +22,24 @@ import {
   TEST_RUNTIME_ENV,
   turnIdFrom,
 } from "./helpers/provider-harness";
+
+const sessionLimitReached = (maxSessions: number) =>
+  `OMP session limit reached (${maxSessions} open sessions). Archive idle agents or raise the session limit in OMP → Plugin.`;
+
+async function openOutcome(connection: ProviderConnection, events: EventLog, sessionId: string) {
+  await connection.send({
+    type: "session.open",
+    requestId: `open-${sessionId}`,
+    sessionId,
+    config: { cwd: "/repo", env: {}, mcpServers: {}, mode: "full", settings: {}, persist: false },
+    history: "skip",
+  });
+  return events.waitFor(
+    (event) =>
+      (event.type === "session.ready" || event.type === "request.failed") &&
+      event.requestId === `open-${sessionId}`,
+  );
+}
 
 describe("OMP direct provider", () => {
   test("bounds concurrent session opens before starting excess runtimes", async () => {
@@ -44,11 +67,161 @@ describe("OMP direct provider", () => {
       (event) => event.type === "request.failed" && event.requestId === "bounded-open-32",
     );
     expect(rejected).toEqual(
-      expect.objectContaining({ error: { message: "OMP session limit reached" } }),
+      expect.objectContaining({ error: { message: sessionLimitReached(32) } }),
     );
     expect(runtime.starts).toHaveLength(32);
     gate.resolve();
     await connection.close();
+  });
+  test("counts sessions on every connection before starting OMP", async () => {
+    const runtime = new FakeOmpRuntime();
+    const provider = createOmpProvider({
+      runtime,
+      environment: TEST_RUNTIME_ENV,
+      browserAuthorizationRegistry: new OmpBrowserAuthorizationRegistry(),
+    });
+    const request = { versions: [1], capabilities: ["prompt.message"] };
+    // The host opens a connection per configured provider; they all share one browser registry.
+    const first = await provider.connect(request);
+    const second = await provider.connect(request);
+    const events = new EventLog();
+    first.onEvent((event) => events.push(event));
+    second.onEvent((event) => events.push(event));
+    for (let index = 0; index < 32; index += 1) {
+      const connection = index % 2 === 0 ? first : second;
+      expect(await openOutcome(connection, events, `shared-${index}`)).toEqual(
+        expect.objectContaining({ type: "session.ready" }),
+      );
+    }
+
+    expect(await openOutcome(first, events, "shared-32")).toEqual(
+      expect.objectContaining({
+        type: "request.failed",
+        error: { message: sessionLimitReached(32) },
+      }),
+    );
+    expect(runtime.starts).toHaveLength(32);
+    await first.close();
+    await second.close();
+  });
+  test("shares a configured session limit across providers", async () => {
+    let configured = 2;
+    const sessionLimit = new OmpSessionLimit(async () => configured);
+    const runtime = new FakeOmpRuntime();
+    const request = { versions: [1], capabilities: ["prompt.message"] };
+    const first = await createOmpProvider({
+      runtime,
+      environment: TEST_RUNTIME_ENV,
+      sessionLimit,
+    }).connect(request);
+    const second = await createOmpProvider({
+      runtime,
+      environment: TEST_RUNTIME_ENV,
+      sessionLimit,
+    }).connect(request);
+    const events = new EventLog();
+    first.onEvent((event) => events.push(event));
+    second.onEvent((event) => events.push(event));
+    const ready = expect.objectContaining({ type: "session.ready" });
+    const refused = (maxSessions: number) =>
+      expect.objectContaining({
+        type: "request.failed",
+        error: { message: sessionLimitReached(maxSessions) },
+      });
+
+    expect(await openOutcome(first, events, "first-a")).toEqual(ready);
+    expect(await openOutcome(second, events, "second-a")).toEqual(ready);
+    expect(await openOutcome(second, events, "second-b")).toEqual(refused(2));
+    expect(runtime.starts).toHaveLength(2);
+
+    await second.send({
+      type: "session.close",
+      requestId: "close-second-a",
+      sessionId: "second-a",
+    });
+    await events.waitFor(
+      (event) => event.type === "request.completed" && event.requestId === "close-second-a",
+    );
+    expect(await openOutcome(second, events, "second-c")).toEqual(ready);
+
+    configured = 3;
+    await sessionLimit.refresh();
+    expect(await openOutcome(second, events, "second-d")).toEqual(ready);
+    expect(await openOutcome(first, events, "first-b")).toEqual(refused(3));
+
+    await first.close();
+    expect(await openOutcome(second, events, "second-e")).toEqual(ready);
+    await second.close();
+  });
+  test("keeps a session with unresolved cleanup counted after its connection closes", async () => {
+    const runtime = new FakeOmpRuntime();
+    const cleanup = Promise.withResolvers<void>();
+    runtime.nextCloseError = new OmpCleanupFailure("cleanup pending", cleanup.promise);
+    const sessionLimit = new OmpSessionLimit(async () => 1);
+    const provider = createOmpProvider({ runtime, environment: TEST_RUNTIME_ENV, sessionLimit });
+    const request = { versions: [1], capabilities: ["prompt.message"] };
+    const first = await provider.connect(request);
+    const second = await provider.connect(request);
+    const events = new EventLog();
+    first.onEvent((event) => events.push(event));
+    second.onEvent((event) => events.push(event));
+
+    expect(await openOutcome(first, events, "stuck")).toEqual(
+      expect.objectContaining({ type: "session.ready" }),
+    );
+    await expect(first.close()).rejects.toThrow("provider connection cleanup failed");
+    expect(await openOutcome(second, events, "blocked")).toEqual(
+      expect.objectContaining({
+        type: "request.failed",
+        error: { message: sessionLimitReached(1) },
+      }),
+    );
+
+    cleanup.resolve();
+    await vi.waitFor(() => expect(sessionLimit.openSessions).toBe(0));
+    expect(await openOutcome(second, events, "freed")).toEqual(
+      expect.objectContaining({ type: "session.ready" }),
+    );
+    await second.close();
+  });
+  test("counts a session once while its replay keeps it opening", async () => {
+    const runtime = new FakeOmpRuntime();
+    runtime.descriptors.push({ id: NATIVE_SESSION_ID, cwd: "/repo" });
+    const historyStarted = Promise.withResolvers<void>();
+    runtime.nextHistoryObserved = historyStarted.resolve;
+    runtime.nextHistoryGate = Promise.withResolvers<void>().promise;
+    const sessionLimit = new OmpSessionLimit(async () => 2);
+    const provider = createOmpProvider({ runtime, environment: TEST_RUNTIME_ENV, sessionLimit });
+    const first = await provider.connect({
+      versions: [1],
+      capabilities: ["prompt.message", "session.persistence"],
+    });
+    const second = await provider.connect({ versions: [1], capabilities: ["prompt.message"] });
+    const events = new EventLog();
+    first.onEvent((event) => events.push(event));
+    second.onEvent((event) => events.push(event));
+
+    await first.send({
+      type: "session.open",
+      requestId: "open-replaying",
+      sessionId: "replaying",
+      config: { cwd: "/repo", env: {}, mcpServers: {}, mode: "full", settings: {}, persist: true },
+      persistence: { version: 1, data: { sessionId: NATIVE_SESSION_ID } },
+      history: "replay",
+    });
+    await historyStarted.promise;
+
+    expect(await openOutcome(second, events, "alongside")).toEqual(
+      expect.objectContaining({ type: "session.ready" }),
+    );
+    expect(await openOutcome(second, events, "over")).toEqual(
+      expect.objectContaining({
+        type: "request.failed",
+        error: { message: sessionLimitReached(2) },
+      }),
+    );
+    await first.close();
+    await second.close();
   });
   test("bounds connection-wide active operations before dispatch", async () => {
     const runtime = new FakeOmpRuntime();

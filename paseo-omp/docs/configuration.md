@@ -2,7 +2,7 @@
 
 Open the global **OMP** sidebar to browse and edit machine-wide state, or open the workspace **OMP** panel from the workspace tab or Explorer to manage project-scoped state. Scalar edits in the global surface use OMP's native `config set` and `config reset` commands. The same view provides bounded row editors for `modelRoles`, `retry.fallbackChains`, `cycleOrder`, `task.agentModelOverrides`, `task.agentServiceTierOverrides`, `task.agentPrewalk`, and `task.agentAdvisor` when OMP includes them in its native settings catalog. Workspace edits create validated overrides in `<workspace>/.omp/config.yml`; removing an override restores the effective global or default value. Other arrays and records, and all credentials, remain read-only.
 
-The **Plugin** tab documents and manages host-wide inherited environment names, plus the supported `omp-plugin` profile launch options. Paseo's public plugin API does not expose the effective provider options for active launches, so the tab does not claim profile values are active. Choose **OMP Plugin** when creating an agent. Model, mode, thinking level, system prompt, persistence, MCP servers, workspace, and agent environment use Paseo's standard provider controls.
+The **Plugin** tab documents and manages host-wide inherited environment names and the session limit, plus the supported `omp-plugin` profile launch options. Paseo's public plugin API does not expose the effective provider options for active launches, so the tab does not claim profile values are active. Choose **OMP Plugin** when creating an agent. Model, mode, thinking level, system prompt, persistence, MCP servers, workspace, and agent environment use Paseo's standard provider controls.
 
 ## Provider profile launch overrides
 
@@ -46,6 +46,10 @@ Paseo's generic provider profile fields remain available:
 | `paseoTools` | Enables or restricts which caller-scoped Paseo orchestration tools the daemon includes before they reach OMP as MCP host tools. |
 
 These options cover plugin-specific profile overrides. Host-wide inherited environment names are configured separately in **OMP → Plugin**. Values that belong to an individual agent, including model, mode, thinking level, title, system prompt, MCP servers, persistence, and cwd, remain standard Paseo session fields rather than duplicate plugin options.
+
+## Session limit
+
+**OMP → Plugin → Session limit** caps how many OMP Plugin sessions can be open on the host at once. One count covers the default provider, every `OMP · <profile>` provider, and every configured provider that extends them. Idle agents count while their sessions are open; archiving an agent closes its session. The default is 32 and the maximum is 64. At the limit, a new agent fails with `OMP session limit reached (<limit> open sessions)` before any OMP process starts. Archive idle agents or raise the limit; a new value applies to the next session that opens and leaves open sessions running.
 
 ## OMP-native plugins
 

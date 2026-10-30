@@ -12,6 +12,7 @@ import { OmpRpcRuntime, type OmpRuntime } from "./omp-rpc";
 import type { OmpProtocolViolationDiagnostic } from "./omp-rpc-protocol";
 import { parseOmpProviderOptions } from "./provider-options";
 import { boundedJsonBytes } from "./security";
+import { OmpSessionLimit } from "./session-limit";
 import { OmpProviderOptionsSchema } from "./settings";
 import type { OmpTimelineScheduler } from "./timeline-projector";
 
@@ -121,6 +122,8 @@ export interface OmpProviderOptions {
   mcpInitializationTimeoutMs?: number;
   mcpConnector?: OmpMcpConnector;
   browserAuthorizationRegistry?: OmpBrowserAuthorizationRegistry;
+  /** Shared by every provider of one plugin instance; each provider has its own otherwise. */
+  sessionLimit?: OmpSessionLimit;
   reportProtocolViolation?: (diagnostic: OmpProtocolViolationDiagnostic) => void | Promise<void>;
   reportOperationalFailure?: OmpOperationalFailureReporter;
   availabilityProbe?: (
@@ -150,6 +153,7 @@ export function createOmpProvider(options: OmpProviderOptions = {}): ProviderReg
       reportProtocolViolation: options.reportProtocolViolation,
     });
   const nativeReservations = new OmpNativeSessionReservations();
+  const sessionLimit = options.sessionLimit ?? new OmpSessionLimit();
   const checkAvailability: NonNullable<ProviderRegistrationCompat["checkAvailability"]> = async (
     catalogOptions,
     context,
@@ -216,6 +220,7 @@ export function createOmpProvider(options: OmpProviderOptions = {}): ProviderReg
       const capabilities = CAPABILITIES.filter((capability) =>
         requestedCapabilities.has(capability),
       );
+      await sessionLimit.refresh();
       return createOmpConnection(
         runtime,
         capabilities,
@@ -229,6 +234,7 @@ export function createOmpProvider(options: OmpProviderOptions = {}): ProviderReg
         undefined,
         options.reportOperationalFailure,
         options.resolveHostInheritEnv,
+        sessionLimit,
       );
     },
   };

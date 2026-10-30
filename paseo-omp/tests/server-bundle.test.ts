@@ -64,7 +64,7 @@ async function supportReportFromBundle(entryPath: string): Promise<string> {
   const cleanup = module.default({
     before: () => () => {},
     handle: (contract: { name: string }, handler: unknown) => handlers.push([contract, handler]),
-    registerSettings: () => {},
+    registerSettings: () => ({ subscribe: () => () => {} }),
     registerProvider: () => {},
   });
   try {
@@ -173,7 +173,13 @@ describe("plugin server bundle", () => {
           },
           handle: (contract: { name: string }, handler: unknown) =>
             handlers.push([contract, handler]),
-          registerSettings: (definition: unknown) => settings.push(definition),
+          registerSettings: (definition: { schema: { parse(value: unknown): unknown } }) => {
+            settings.push(definition);
+            return {
+              read: async () => ({ status: "ready", values: definition.schema.parse({}) }),
+              subscribe: () => () => {},
+            };
+          },
           registerProvider: (provider: ProviderRegistration) => providers.push(provider),
         });
         expect(handlers).toHaveLength(17);

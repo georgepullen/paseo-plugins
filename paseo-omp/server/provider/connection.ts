@@ -34,6 +34,7 @@ import {
 } from "./security";
 import { type OmpOpenedSession, OmpProviderSession, ompPersistenceSessionId } from "./session";
 import { OmpHistorySession } from "./session-history";
+import { OmpSessionLimit } from "./session-limit";
 import { isOmpHistoryOnlyOpen } from "./session-purpose";
 
 type ProviderConfigurationCompat = {
@@ -69,7 +70,6 @@ const SUPPORTED_INPUTS: Readonly<Record<string, true>> = {
   "session.can_stop_runtime": true,
   "session.close": true,
 };
-const MAX_CONNECTION_SESSIONS = 32;
 const MAX_ACTIVE_OPERATIONS = 128;
 const MAX_PROVIDER_INPUT_BYTES = 2 * 1024 * 1024;
 const MAX_NESTED_OPTION_BYTES = 256 * 1024;
@@ -723,6 +723,7 @@ export function createOmpConnection(
     console.error("OMP provider failure", diagnostic),
   reportOperationalFailure: OmpOperationalFailureReporter = () => {},
   resolveHostInheritEnv?: () => Promise<readonly string[]>,
+  sessionLimit = new OmpSessionLimit(),
 ): ProviderConnection {
   const errorDetails = (error: unknown, fallback: string): { message: string } => {
     if (isOmpPublicError(error)) return { message: error.message };
@@ -767,6 +768,13 @@ export function createOmpConnection(
     string,
     { token: symbol; nativeSessionId?: string; cleanup?: Promise<void> }
   >();
+  // One session id is held by `sessions`, `opening` and `failedCleanup` at different moments, and
+  // by two of them at once while it opens or fails. After a failed close only unresolved cleanup
+  // stays counted, until it drains.
+  const untrackSessions = sessionLimit.track(() => {
+    if (closed) return failedCleanup.size;
+    return new Set([...sessions.keys(), ...opening.keys(), ...failedCleanup.keys()]).size;
+  });
   const shutdown = new AbortController();
   let catalogCleanup: Promise<void> | null = null;
   const activeOperations = new Set<Promise<void>>();
@@ -809,7 +817,9 @@ export function createOmpConnection(
       ...(quarantinedNativeSessionId ? { nativeSessionId: quarantinedNativeSessionId } : {}),
     });
     nativeReservations.quarantine(quarantinedNativeSessionId, token, cleanup, () => {
-      if (failedCleanup.get(sessionId)?.token === token) failedCleanup.delete(sessionId);
+      if (failedCleanup.get(sessionId)?.token !== token) return;
+      failedCleanup.delete(sessionId);
+      if (closed && failedCleanup.size === 0) untrackSessions();
     });
   };
 
@@ -906,8 +916,13 @@ export function createOmpConnection(
           requestFailure(input.requestId, new OmpPublicError("OMP session already exists"));
           return;
         }
-        if (sessions.size + opening.size + failedCleanup.size >= MAX_CONNECTION_SESSIONS) {
-          requestFailure(input.requestId, new OmpPublicError("OMP session limit reached"));
+        if (sessionLimit.openSessions >= sessionLimit.maxSessions) {
+          requestFailure(
+            input.requestId,
+            new OmpPublicError(
+              `OMP session limit reached (${sessionLimit.maxSessions} open sessions). Archive idle agents or raise the session limit in OMP → Plugin.`,
+            ),
+          );
           return;
         }
         const token = Symbol(input.sessionId);
@@ -1313,7 +1328,12 @@ export function createOmpConnection(
       return () => listeners.delete(listener);
     },
     close() {
-      closePromise ??= Promise.resolve().then(disposeConnection);
+      closePromise ??= Promise.resolve()
+        .then(disposeConnection)
+        .then(untrackSessions, (error: unknown) => {
+          if (failedCleanup.size === 0) untrackSessions();
+          throw error;
+        });
       return closePromise;
     },
   };

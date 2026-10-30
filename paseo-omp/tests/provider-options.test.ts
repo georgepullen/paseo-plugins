@@ -279,6 +279,14 @@ describe("OMP provider option normalization", () => {
     }
   });
 
+  test("bounds the host-wide session limit", () => {
+    expect(providerLaunchSettingsSchema.parse({})).toEqual({ inheritEnv: [], maxSessions: 32 });
+    expect(providerLaunchSettingsSchema.parse({ maxSessions: 64 }).maxSessions).toBe(64);
+    for (const maxSessions of [0, 65, 1.5]) {
+      expect(() => providerLaunchSettingsSchema.parse({ maxSessions })).toThrow();
+    }
+  });
+
   test("rejects unknown or malformed options instead of stripping them", () => {
     expect(() => parseOmpProviderOptions({ typo: true })).toThrow(
       "providerOptions: Unrecognized key",
