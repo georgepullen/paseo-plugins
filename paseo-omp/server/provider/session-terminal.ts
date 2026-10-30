@@ -65,6 +65,8 @@ export type ActiveTurn = {
   terminalizing: boolean;
   terminalization?: Promise<void>;
   terminalOutcome?: TurnOutcome;
+  /** Listeners may hold this turn's terminal state from here on, even if publishing threw. */
+  terminalEmitAttempted: boolean;
   operationalTerminalStage?: "failed" | "unresolved";
   terminalWake?: VoidDeferred;
   steerReady: VoidDeferred;
@@ -283,6 +285,7 @@ export function createActiveTurn(
     usageSampleFloor: 0,
     agentEndPending: false,
     terminalizing: false,
+    terminalEmitAttempted: false,
     manualCompactionPending: manualCompaction,
     manualCompaction,
     activitySequence: 0,

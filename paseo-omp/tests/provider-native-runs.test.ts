@@ -65,6 +65,68 @@ async function canStop(
   return answer.canStop;
 }
 
+function terminalsOf(events: readonly ProviderEvent[], turnId: string): ProviderEvent[] {
+  return events.filter(
+    (event) =>
+      event.type === "session.turn" && event.turnId === turnId && event.state !== "started",
+  );
+}
+
+/**
+ * Finishes a prompted turn while a run start waits behind its final usage sample, with a second
+ * listener that throws on the first event `throwsOn` accepts.
+ */
+async function finishWithThrowingListener(
+  throwsOn: (event: ProviderEvent, first: string) => boolean,
+  beforeRelease: () => void,
+) {
+  const { connection, events, session } = await openIdle();
+  const unhandled: unknown[] = [];
+  const recordUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", recordUnhandled);
+  const first = turnIdFrom(await startPrompt(connection, events, "first", "work"));
+  const throwingListenerEvents: ProviderEvent[] = [];
+  connection.onEvent((event) => {
+    throwingListenerEvents.push(event);
+    if (throwsOn(event, first)) throw new Error("listener failed");
+  });
+  const usage = Promise.withResolvers<void>();
+  session.statsGate = usage.promise;
+  const lookups = session.statsLookups;
+  establishTerminalOwnership(session);
+  session.emit({
+    type: "agent_end",
+    requestId: "rpc-prompt-1",
+    messages: [reply("first done")],
+    isTerminal: true,
+  });
+  while (session.statsLookups === lookups) await new Promise(setImmediate);
+  session.emit({ type: "agent_start" });
+  session.emit({ type: "message_end", message: reply("second run") });
+  beforeRelease();
+  session.statsGate = null;
+  usage.resolve();
+  // A replay that re-defers on a rejected terminalization never yields to a macrotask.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  return {
+    events,
+    first,
+    throwingListenerEvents,
+    async expectRuntimeFailedOnce() {
+      try {
+        expect(turnStarts(events)).toEqual([first]);
+        expect(session.closes).toBe(1);
+        expect(unhandled).toEqual([]);
+        const next = turnIdFrom(await startPrompt(connection, events, "after-failure", "again"));
+        expect(turnStarts(events)).toEqual([first, next]);
+      } finally {
+        process.off("unhandledRejection", recordUnhandled);
+        await connection.close();
+      }
+    },
+  };
+}
+
 const reply = (content: string, stopReason = "stop") => ({
   role: "assistant" as const,
   content,
@@ -206,55 +268,46 @@ describe("OMP runs started without a client prompt", () => {
     await connection.close();
   });
 
-  test("fails the runtime, without looping a run start, when a turn's terminal cannot be published", async () => {
-    const { connection, events, session } = await openIdle();
-    const unhandled: unknown[] = [];
-    const recordUnhandled = (reason: unknown) => unhandled.push(reason);
-    process.on("unhandledRejection", recordUnhandled);
-    try {
-      const first = turnIdFrom(await startPrompt(connection, events, "first", "work"));
-      connection.onEvent((event) => {
-        if (event.type === "session.turn" && event.turnId === first && event.state !== "started") {
-          throw new Error("terminal listener failed");
-        }
-      });
-      const usage = Promise.withResolvers<void>();
-      session.statsGate = usage.promise;
-      const lookups = session.statsLookups;
-      establishTerminalOwnership(session);
-      session.emit({
-        type: "agent_end",
-        requestId: "rpc-prompt-1",
-        messages: [reply("first done")],
-        isTerminal: true,
-      });
-      while (session.statsLookups === lookups) await new Promise(setImmediate);
-      // The next run starts while the turn waits for its final usage sample.
-      session.emit({ type: "agent_start" });
-      session.emit({ type: "message_end", message: reply("second run") });
-      session.statsGate = null;
-      usage.resolve();
-      // A replay that re-defers on a rejected terminalization never yields to a macrotask.
-      await new Promise((resolve) => setTimeout(resolve, 50));
+  test("publishes failed once when finishing a turn throws before its terminal is emitted", async () => {
+    let armed = false;
+    const run = await finishWithThrowingListener(
+      (event) => {
+        // The fallback user row is published while the turn finishes, before its terminal.
+        if (!armed || event.type !== "timeline.item") return false;
+        armed = false;
+        return true;
+      },
+      () => {
+        armed = true;
+      },
+    );
 
-      expect(events).toContainEqual(
-        expect.objectContaining({
-          type: "session.turn",
-          turnId: first,
-          state: "failed",
-          error: { message: "OMP turn could not be finalized" },
-        }),
-      );
-      expect(turnStarts(events)).toEqual([first]);
-      expect(session.closes).toBe(1);
-      expect(unhandled).toEqual([]);
+    expect(terminalsOf(run.events, run.first)).toEqual([
+      expect.objectContaining({
+        state: "failed",
+        error: { message: "OMP turn could not be finalized" },
+      }),
+    ]);
+    expect(terminalsOf(run.throwingListenerEvents, run.first)).toEqual([
+      expect.objectContaining({ state: "failed" }),
+    ]);
+    await run.expectRuntimeFailedOnce();
+  });
 
-      const next = turnIdFrom(await startPrompt(connection, events, "after-failure", "again"));
-      expect(turnStarts(events)).toEqual([first, next]);
-    } finally {
-      process.off("unhandledRejection", recordUnhandled);
-    }
-    await connection.close();
+  test("publishes no second terminal when a later listener throws on the first", async () => {
+    const run = await finishWithThrowingListener(
+      (event, first) =>
+        event.type === "session.turn" && event.turnId === first && event.state !== "started",
+      () => {},
+    );
+
+    expect(terminalsOf(run.events, run.first)).toEqual([
+      expect.objectContaining({ state: "completed" }),
+    ]);
+    expect(terminalsOf(run.throwingListenerEvents, run.first)).toEqual([
+      expect.objectContaining({ state: "completed" }),
+    ]);
+    await run.expectRuntimeFailedOnce();
   });
 
   test("restores a truncated held end's streamed outcome when OMP settles", async () => {

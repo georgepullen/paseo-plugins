@@ -3490,6 +3490,7 @@ export class OmpProviderSession implements OmpOpenedSession {
         throw error;
       }
       this.unclaimedBranchEntries.length = 0;
+      turn.terminalEmitAttempted = true;
       this.emit({
         type: "session.turn",
         sessionId: this.id,
@@ -3509,16 +3510,21 @@ export class OmpProviderSession implements OmpOpenedSession {
     const message = "OMP turn could not be finalized";
     turn.terminal = true;
     if (this.activeTurn === turn) this.activeTurn = null;
-    try {
-      this.emit({
-        type: "session.turn",
-        sessionId: this.id,
-        turnId: turn.turnId,
-        state: "failed",
-        error: { message },
-      });
-    } catch {
-      // Publishing the terminal may be what failed; the runtime failure below still applies.
+    this.recordOperationalFailure({ category: "terminal-outcome", stage: "failed" });
+    // Once the terminal emit was attempted, earlier listeners may already hold it; a second,
+    // conflicting terminal would be worse than failing the runtime alone.
+    if (!turn.terminalEmitAttempted) {
+      try {
+        this.emit({
+          type: "session.turn",
+          sessionId: this.id,
+          turnId: turn.turnId,
+          state: "failed",
+          error: { message },
+        });
+      } catch {
+        // The listener that failed may fail again; the runtime failure below still applies.
+      }
     }
     this.handleRuntimeFailure(message);
   }
