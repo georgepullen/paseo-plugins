@@ -25,6 +25,12 @@ function snapshot(id: string, status: OmpSubagentSnapshot["status"] = "running")
   return { id, index: 0, agent: "worker", description: `${id} task`, status, lastUpdate: 1 };
 }
 
+async function onlyHandle(registry: OmpSubagentControlRegistry, agentId: string) {
+  const [subagent] = (await resolveListOmpSubagents({ agentId }, registry)).subagents;
+  if (!subagent) throw new Error("Missing listed subagent");
+  return subagent.id;
+}
+
 async function createControlledHarness() {
   const runtime = new FakeOmpRuntime();
   const registry = new OmpSubagentControlRegistry();
@@ -65,28 +71,47 @@ describe("OMP subagent controls", () => {
     const first = sessionAt(runtime, 0);
     const second = sessionAt(runtime, 1);
     first.subagents = [
-      { ...snapshot("a-child"), description: "uses credential-secret" },
+      { ...snapshot("a-credential-secret"), description: "uses credential-secret" },
       snapshot("a-finished", "completed"),
     ];
     second.subagents = [snapshot("b-child")];
 
-    await expect(resolveListOmpSubagents({ agentId: "agent-a" }, registry)).resolves.toEqual({
-      subagents: [
-        { id: "a-child", agent: "worker", description: "uses <redacted>", status: "running" },
-        { id: "a-finished", agent: "worker", description: "a-finished task", status: "completed" },
-      ],
-    });
+    const listedA = (await resolveListOmpSubagents({ agentId: "agent-a" }, registry)).subagents;
+    expect(listedA).toEqual([
+      {
+        id: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/),
+        name: "a-<redacted>",
+        agent: "worker",
+        description: "uses <redacted>",
+        status: "running",
+      },
+      {
+        id: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/),
+        name: "a-finished",
+        agent: "worker",
+        description: "a-finished task",
+        status: "completed",
+      },
+    ]);
+    expect(JSON.stringify(listedA)).not.toContain("credential-secret");
+    const [running, finished] = listedA.map((subagent) => subagent.id);
+    const [foreign] = (await resolveListOmpSubagents({ agentId: "agent-b" }, registry)).subagents;
+    if (!running || !finished || !foreign) throw new Error("Missing listed subagents");
+
     await expect(
-      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: "b-child" }, registry),
+      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: foreign.id }, registry),
     ).resolves.toEqual({ cancelled: false });
     await expect(
       resolveSteerOmpSubagent(
-        { agentId: "agent-a", subagentId: "b-child", message: "x" },
+        { agentId: "agent-a", subagentId: foreign.id, message: "x" },
         registry,
       ),
     ).rejects.toThrow("This subagent is no longer running");
     await expect(
-      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: "a-finished" }, registry),
+      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: "a-credential-secret" }, registry),
+    ).resolves.toEqual({ cancelled: false });
+    await expect(
+      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: finished }, registry),
     ).resolves.toEqual({ cancelled: false });
     expect(first.subagentCancels).toEqual([]);
     expect(second.subagentCancels).toEqual([]);
@@ -94,21 +119,21 @@ describe("OMP subagent controls", () => {
 
     await expect(
       resolveSteerOmpSubagent(
-        { agentId: "agent-a", subagentId: "a-child", message: "Focus on the parser" },
+        { agentId: "agent-a", subagentId: running, message: "Focus on the parser" },
         registry,
       ),
     ).resolves.toEqual({ accepted: true });
     await expect(
-      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: "a-child" }, registry),
+      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: running }, registry),
     ).resolves.toEqual({ cancelled: true });
     first.subagentCancelResult = false;
     await expect(
-      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: "a-child" }, registry),
+      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: running }, registry),
     ).resolves.toEqual({ cancelled: false });
     expect(first.subagentSteers).toEqual([
-      { subagentId: "a-child", message: "Focus on the parser" },
+      { subagentId: "a-credential-secret", message: "Focus on the parser" },
     ]);
-    expect(first.subagentCancels).toEqual(["a-child", "a-child"]);
+    expect(first.subagentCancels).toEqual(["a-credential-secret", "a-credential-secret"]);
     expect(second.subagentCancels).toEqual([]);
 
     await connection.send({ type: "session.close", requestId: "close-a", sessionId: "session-a" });
@@ -120,7 +145,7 @@ describe("OMP subagent controls", () => {
       subagents: [],
     });
     await expect(
-      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: "a-child" }, registry),
+      resolveCancelOmpSubagent({ agentId: "agent-a", subagentId: running }, registry),
     ).rejects.toThrow("This agent has no running OMP Plugin session");
     expect(registry.get("agent-b")).toBeDefined();
     await connection.close();
@@ -154,9 +179,10 @@ describe("OMP subagent controls", () => {
     );
     if (childOpened.type !== "session.opened") throw new Error("Missing child session");
     session.subagents = [snapshot("child-1")];
+    const handle = await onlyHandle(registry, "agent-1");
 
     await expect(
-      resolveCancelOmpSubagent({ agentId: "agent-1", subagentId: "child-1" }, registry),
+      resolveCancelOmpSubagent({ agentId: "agent-1", subagentId: handle }, registry),
     ).resolves.toEqual({ cancelled: true });
     session.subagents = [];
     session.emit({
@@ -205,11 +231,12 @@ describe("OMP subagent controls", () => {
     await openSession(connection, events, "open-1", "session-1", { PASEO_AGENT_ID: "agent-1" });
     const session = sessionAt(runtime);
     session.subagents = [snapshot("child-1")];
+    const handle = await onlyHandle(registry, "agent-1");
     const cancel = () =>
-      resolveCancelOmpSubagent({ agentId: "agent-1", subagentId: "child-1" }, registry);
+      resolveCancelOmpSubagent({ agentId: "agent-1", subagentId: handle }, registry);
     const steer = () =>
       resolveSteerOmpSubagent(
-        { agentId: "agent-1", subagentId: "child-1", message: "focus" },
+        { agentId: "agent-1", subagentId: handle, message: "focus" },
         registry,
       );
 
@@ -244,6 +271,38 @@ describe("OMP subagent controls", () => {
     await expect(steer()).rejects.toThrow("This subagent is no longer running");
     expect(session.subagentCancels).toHaveLength(cancelsBeforeExit);
     expect(runtime.starts).toHaveLength(1);
+    await connection.close();
+  });
+
+  test("sends nothing when the runtime dies while the roster is being read", async () => {
+    const { connection, events, runtime, registry } = await createControlledHarness();
+    await openSession(connection, events, "open-1", "session-1", { PASEO_AGENT_ID: "agent-1" });
+    const session = sessionAt(runtime);
+    session.subagents = [snapshot("child-1")];
+    const handle = await onlyHandle(registry, "agent-1");
+    const gate = Promise.withResolvers<void>();
+    const bothReading = Promise.withResolvers<void>();
+    let reads = 0;
+    session.subagentsGate = gate.promise;
+    session.subagentsObserved = () => {
+      reads += 1;
+      if (reads === 2) bothReading.resolve();
+    };
+    const cancelling = resolveCancelOmpSubagent(
+      { agentId: "agent-1", subagentId: handle },
+      registry,
+    );
+    const steering = resolveSteerOmpSubagent(
+      { agentId: "agent-1", subagentId: handle, message: "focus" },
+      registry,
+    );
+    await bothReading.promise;
+    session.emit({ type: "process_exit", error: "OMP exited between turns" });
+    gate.resolve();
+    await expect(cancelling).resolves.toEqual({ cancelled: false });
+    await expect(steering).rejects.toThrow("This subagent is no longer running");
+    expect(session.subagentCancels).toEqual([]);
+    expect(session.subagentSteers).toEqual([]);
     await connection.close();
   });
 

@@ -2,10 +2,12 @@ import { describe, expect, test } from "vitest";
 import {
   INITIAL_SUBAGENT_PANEL_STATE,
   isSubagentRequestPending,
+  requestedSubmission,
   type SubagentPanelAction,
   type SubagentPanelState,
   steerDraftProblem,
   subagentPanelReducer,
+  subagentRequestError,
 } from "../client/subagents-state";
 import {
   cancelOmpSubagent,
@@ -16,19 +18,28 @@ import {
   steerOmpSubagent,
 } from "../shared/subagents";
 
+const CHILD = {
+  id: "opaque-handle-1",
+  name: "child-1",
+  agent: "worker",
+  description: null,
+  status: "running" as const,
+};
+const OTHER = { ...CHILD, id: "opaque-handle-2", name: "child-2" };
+
 function run(...actions: SubagentPanelAction[]): SubagentPanelState {
   return actions.reduce(subagentPanelReducer, INITIAL_SUBAGENT_PANEL_STATE);
 }
 
 describe("OMP subagent panel state", () => {
   test("cancel requires a confirmation and reports idempotent outcomes", () => {
-    const confirming = run({ type: "request-cancel", subagentId: "child-1" });
-    expect(confirming).toEqual({ kind: "confirming-cancel", subagentId: "child-1" });
+    const confirming = run({ type: "request-cancel", subagent: CHILD });
+    expect(confirming).toEqual({ kind: "confirming-cancel", subagent: CHILD });
     expect(subagentPanelReducer(confirming, { type: "dismiss" })).toEqual(
       INITIAL_SUBAGENT_PANEL_STATE,
     );
     const cancelling = subagentPanelReducer(confirming, { type: "submit" });
-    expect(cancelling).toEqual({ kind: "cancelling", subagentId: "child-1" });
+    expect(cancelling).toEqual({ kind: "cancelling", subagent: CHILD });
     expect(isSubagentRequestPending(cancelling)).toBe(true);
     expect(subagentPanelReducer(cancelling, { type: "cancelled", cancelled: true })).toEqual({
       kind: "idle",
@@ -44,21 +55,21 @@ describe("OMP subagent panel state", () => {
   });
 
   test("steering validates the draft and keeps it after a failed send", () => {
-    const empty = run({ type: "start-steer", subagentId: "child-1" }, { type: "submit" });
+    const empty = run({ type: "start-steer", subagent: CHILD }, { type: "submit" });
     expect(empty).toEqual({
       kind: "steering",
-      subagentId: "child-1",
+      subagent: CHILD,
       draft: "",
       error: "Enter a message for the subagent",
     });
     const sending = run(
-      { type: "start-steer", subagentId: "child-1" },
+      { type: "start-steer", subagent: CHILD },
       { type: "edit-draft", draft: "Focus on the parser" },
       { type: "submit" },
     );
     expect(sending).toEqual({
       kind: "sending",
-      subagentId: "child-1",
+      subagent: CHILD,
       draft: "Focus on the parser",
     });
     expect(subagentPanelReducer(sending, { type: "steered" })).toEqual({
@@ -72,21 +83,49 @@ describe("OMP subagent panel state", () => {
       }),
     ).toEqual({
       kind: "steering",
-      subagentId: "child-1",
+      subagent: CHILD,
       draft: "Focus on the parser",
       error: "This subagent is no longer running",
     });
   });
 
+  test("shows the handler's message without transport details", () => {
+    const rpcError = Object.assign(
+      new Error(
+        "Request failed: This subagent is no longer running requestType=plugin.rpc.invoke.request code=handler_error",
+      ),
+      { userMessage: "Request failed: This subagent is no longer running" },
+    );
+    expect(subagentRequestError(rpcError)).toBe(
+      "Request failed: This subagent is no longer running",
+    );
+    expect(subagentRequestError(new Error("offline"))).toBe("offline");
+    expect(subagentRequestError("boom")).toBe("The OMP subagent request failed");
+  });
+
+  test("starts at most one request per submission", () => {
+    const confirming = run({ type: "request-cancel", subagent: CHILD });
+    expect(requestedSubmission(confirming)).toEqual({ kind: "cancelling", subagent: CHILD });
+    const steering = run({ type: "start-steer", subagent: CHILD });
+    expect(requestedSubmission(steering)).toBeNull();
+    const drafted = subagentPanelReducer(steering, { type: "edit-draft", draft: "focus" });
+    const sending = requestedSubmission(drafted);
+    expect(sending).toEqual({ kind: "sending", subagent: CHILD, draft: "focus" });
+    if (!sending) throw new Error("Expected a steering request");
+    expect(requestedSubmission(sending)).toBeNull();
+    expect(requestedSubmission(subagentPanelReducer(confirming, { type: "submit" }))).toBeNull();
+    expect(requestedSubmission(INITIAL_SUBAGENT_PANEL_STATE)).toBeNull();
+  });
+
   test("ignores new requests and unrelated outcomes while a request is pending", () => {
     const sending = run(
-      { type: "start-steer", subagentId: "child-1" },
+      { type: "start-steer", subagent: CHILD },
       { type: "edit-draft", draft: "focus" },
       { type: "submit" },
     );
     for (const action of [
-      { type: "request-cancel", subagentId: "child-2" },
-      { type: "start-steer", subagentId: "child-2" },
+      { type: "request-cancel", subagent: OTHER },
+      { type: "start-steer", subagent: OTHER },
       { type: "edit-draft", draft: "changed" },
       { type: "dismiss" },
       { type: "submit" },

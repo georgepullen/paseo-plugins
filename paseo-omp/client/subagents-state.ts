@@ -1,21 +1,25 @@
-import { OMP_SUBAGENT_STEER_MAX_LENGTH } from "../shared/subagents";
+import { OMP_SUBAGENT_STEER_MAX_LENGTH, type OmpSubagent } from "../shared/subagents";
 
 export interface SubagentNotice {
   tone: "success" | "muted" | "error";
   message: string;
 }
 
-/** One subagent at a time owns the inline confirmation, steering draft, or pending request. */
+/**
+ * One subagent at a time owns the inline confirmation, steering draft, or pending request. The
+ * state keeps that subagent's last listed row, so its draft and outcome stay visible after it
+ * leaves the roster.
+ */
 export type SubagentPanelState =
   | { kind: "idle"; notice: SubagentNotice | null }
-  | { kind: "confirming-cancel"; subagentId: string }
-  | { kind: "steering"; subagentId: string; draft: string; error: string | null }
-  | { kind: "cancelling"; subagentId: string }
-  | { kind: "sending"; subagentId: string; draft: string };
+  | { kind: "confirming-cancel"; subagent: OmpSubagent }
+  | { kind: "steering"; subagent: OmpSubagent; draft: string; error: string | null }
+  | { kind: "cancelling"; subagent: OmpSubagent }
+  | { kind: "sending"; subagent: OmpSubagent; draft: string };
 
 export type SubagentPanelAction =
-  | { type: "request-cancel"; subagentId: string }
-  | { type: "start-steer"; subagentId: string }
+  | { type: "request-cancel"; subagent: OmpSubagent }
+  | { type: "start-steer"; subagent: OmpSubagent }
   | { type: "edit-draft"; draft: string }
   | { type: "dismiss" }
   | { type: "submit" }
@@ -33,10 +37,31 @@ export function steerDraftProblem(draft: string): string | null {
   return null;
 }
 
+/** The host's RPC error keeps the handler's text in `userMessage`, without transport details. */
+export function subagentRequestError(cause: unknown): string {
+  if (cause instanceof Error) {
+    const userMessage: unknown = Reflect.get(cause, "userMessage");
+    return typeof userMessage === "string" && userMessage ? userMessage : cause.message;
+  }
+  return "The OMP subagent request failed";
+}
+
 export function isSubagentRequestPending(
   state: SubagentPanelState,
 ): state is Extract<SubagentPanelState, { kind: "cancelling" | "sending" }> {
   return state.kind === "cancelling" || state.kind === "sending";
+}
+
+/**
+ * The request a submit starts from this state, or `null` when it starts none. A submit while a
+ * request is pending starts nothing, so a repeated press cannot send a second steering message.
+ */
+export function requestedSubmission(
+  state: SubagentPanelState,
+): Extract<SubagentPanelState, { kind: "cancelling" | "sending" }> | null {
+  if (isSubagentRequestPending(state)) return null;
+  const next = subagentPanelReducer(state, { type: "submit" });
+  return isSubagentRequestPending(next) ? next : null;
 }
 
 export function subagentPanelReducer(
@@ -46,22 +71,22 @@ export function subagentPanelReducer(
   if (isSubagentRequestPending(state)) return settle(state, action);
   switch (action.type) {
     case "request-cancel":
-      return { kind: "confirming-cancel", subagentId: action.subagentId };
+      return { kind: "confirming-cancel", subagent: action.subagent };
     case "start-steer":
-      return { kind: "steering", subagentId: action.subagentId, draft: "", error: null };
+      return { kind: "steering", subagent: action.subagent, draft: "", error: null };
     case "edit-draft":
       return state.kind === "steering" ? { ...state, draft: action.draft, error: null } : state;
     case "dismiss":
       return INITIAL_SUBAGENT_PANEL_STATE;
     case "submit":
       if (state.kind === "confirming-cancel") {
-        return { kind: "cancelling", subagentId: state.subagentId };
+        return { kind: "cancelling", subagent: state.subagent };
       }
       if (state.kind === "steering") {
         const problem = steerDraftProblem(state.draft);
         return problem
           ? { ...state, error: problem }
-          : { kind: "sending", subagentId: state.subagentId, draft: state.draft };
+          : { kind: "sending", subagent: state.subagent, draft: state.draft };
       }
       return state;
     default:
@@ -88,7 +113,7 @@ function settle(
   if (state.kind === "sending") {
     return {
       kind: "steering",
-      subagentId: state.subagentId,
+      subagent: state.subagent,
       draft: state.draft,
       error: action.message,
     };

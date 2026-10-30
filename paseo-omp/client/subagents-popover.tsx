@@ -20,10 +20,12 @@ import { isOmpPluginProvider } from "./omp-store-state";
 import {
   INITIAL_SUBAGENT_PANEL_STATE,
   isSubagentRequestPending,
+  requestedSubmission,
   type SubagentNotice,
   type SubagentPanelAction,
   type SubagentPanelState,
   subagentPanelReducer,
+  subagentRequestError,
 } from "./subagents-state";
 
 const SUBAGENT_POLL_MS = 2_000;
@@ -104,28 +106,29 @@ function SubagentList({ agentId, styles }: { agentId: string; styles: Styles }) 
   const [state, dispatch] = useReducer(subagentPanelReducer, INITIAL_SUBAGENT_PANEL_STATE);
 
   async function submit(): Promise<void> {
-    const next = subagentPanelReducer(state, { type: "submit" });
+    const request = requestedSubmission(state);
     dispatch({ type: "submit" });
-    if (next.kind !== "cancelling" && next.kind !== "sending") return;
+    if (!request) return;
     try {
-      if (next.kind === "cancelling") {
-        const result = await cancel({ agentId, subagentId: next.subagentId });
+      if (request.kind === "cancelling") {
+        const result = await cancel({ agentId, subagentId: request.subagent.id });
         dispatch({ type: "cancelled", cancelled: result.cancelled });
       } else {
-        await steer({ agentId, subagentId: next.subagentId, message: next.draft });
+        await steer({ agentId, subagentId: request.subagent.id, message: request.draft });
         dispatch({ type: "steered" });
       }
     } catch (cause) {
-      dispatch({
-        type: "failed",
-        message: cause instanceof Error ? cause.message : "The OMP subagent request failed",
-      });
+      dispatch({ type: "failed", message: subagentRequestError(cause) });
     } finally {
       void queryClient.invalidateQueries({ queryKey });
     }
   }
 
   const items = subagents.data?.subagents ?? [];
+  const unlisted =
+    state.kind !== "idle" && !items.some((subagent) => subagent.id === state.subagent.id)
+      ? state.subagent
+      : null;
   return (
     <View style={styles.root}>
       <Text style={styles.title}>OMP subagents</Text>
@@ -144,12 +147,23 @@ function SubagentList({ agentId, styles }: { agentId: string; styles: Styles }) 
         <SubagentCard
           key={subagent.id}
           subagent={subagent}
+          listed
           state={state}
           styles={styles}
           dispatch={dispatch}
           submit={submit}
         />
       ))}
+      {unlisted ? (
+        <SubagentCard
+          subagent={unlisted}
+          listed={false}
+          state={state}
+          styles={styles}
+          dispatch={dispatch}
+          submit={submit}
+        />
+      ) : null}
       {state.kind === "idle" && state.notice ? (
         <NoticeText notice={state.notice} styles={styles} />
       ) : null}
@@ -198,30 +212,33 @@ function ActionButton({
 
 function SubagentCard({
   subagent,
+  listed,
   state,
   styles,
   dispatch,
   submit,
 }: {
   subagent: OmpSubagent;
+  /** False keeps the row that owns the current request visible after it leaves the roster. */
+  listed: boolean;
   state: SubagentPanelState;
   styles: Styles;
   dispatch: (action: SubagentPanelAction) => void;
   submit(): Promise<void>;
 }) {
-  const live = isLiveOmpSubagentStatus(subagent.status);
+  const live = listed && isLiveOmpSubagentStatus(subagent.status);
   const pending = isSubagentRequestPending(state);
-  const owner = state.kind !== "idle" && state.subagentId === subagent.id ? state : null;
+  const owner = state.kind !== "idle" && state.subagent.id === subagent.id ? state : null;
   return (
     <View style={styles.card}>
       <View style={styles.row}>
         <Text numberOfLines={1} style={styles.name}>
           {subagent.agent}
         </Text>
-        <Text style={styles.status}>{subagent.status}</Text>
+        <Text style={styles.status}>{listed ? subagent.status : "no longer running"}</Text>
       </View>
       <Text numberOfLines={1} style={styles.muted}>
-        {subagent.id}
+        {subagent.name}
       </Text>
       {subagent.description ? (
         <Text numberOfLines={2} style={styles.muted}>
@@ -295,13 +312,13 @@ function SubagentCard({
             label="Steer"
             disabled={pending}
             styles={styles}
-            onPress={() => dispatch({ type: "start-steer", subagentId: subagent.id })}
+            onPress={() => dispatch({ type: "start-steer", subagent })}
           />
           <ActionButton
             label="Cancel"
             disabled={pending}
             styles={styles}
-            onPress={() => dispatch({ type: "request-cancel", subagentId: subagent.id })}
+            onPress={() => dispatch({ type: "request-cancel", subagent })}
           />
         </View>
       ) : null}

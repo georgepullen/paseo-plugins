@@ -12,8 +12,8 @@ import { isOmpPublicError, OmpPublicError } from "./provider/security";
 export interface OmpSubagentControls {
   listSubagents(): Promise<OmpSubagent[]>;
   /** Resolves `false` when the subagent is no longer running. */
-  cancelSubagent(subagentId: string): Promise<boolean>;
-  steerSubagent(subagentId: string, message: string): Promise<void>;
+  cancelSubagent(handle: string): Promise<boolean>;
+  steerSubagent(handle: string, message: string): Promise<void>;
 }
 
 export class OmpSubagentNotRunningError extends OmpPublicError {

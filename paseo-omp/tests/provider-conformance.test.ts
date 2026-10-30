@@ -1047,31 +1047,34 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
               event.event.type === "upsert" &&
               event.event.status === "running",
           );
-          await expect(resolveListOmpSubagents({ agentId }, registry)).resolves.toEqual({
-            subagents: [
-              { id: "held-child", agent: "worker", description: "held child", status: "running" },
-            ],
-          });
+          const { subagents } = await resolveListOmpSubagents({ agentId }, registry);
+          expect(subagents).toEqual([
+            {
+              id: expect.any(String),
+              name: "held-child",
+              agent: "worker",
+              description: "held child",
+              status: "running",
+            },
+          ]);
+          const handle = subagents[0]?.id ?? "";
           await expect(
-            resolveCancelOmpSubagent(
-              { agentId: "another-agent", subagentId: "held-child" },
-              registry,
-            ),
+            resolveCancelOmpSubagent({ agentId: "another-agent", subagentId: handle }, registry),
           ).rejects.toThrow("This agent has no running OMP Plugin session");
           await expect(
             resolveSteerOmpSubagent(
-              { agentId, subagentId: "unlisted-child", message: "focus" },
+              { agentId, subagentId: "held-child", message: "focus" },
               registry,
             ),
           ).rejects.toThrow("This subagent is no longer running");
           await expect(
             resolveSteerOmpSubagent(
-              { agentId, subagentId: "held-child", message: "Drop the glob" },
+              { agentId, subagentId: handle, message: "Drop the glob" },
               registry,
             ),
           ).resolves.toEqual({ accepted: true });
           await expect(
-            resolveCancelOmpSubagent({ agentId, subagentId: "held-child" }, registry),
+            resolveCancelOmpSubagent({ agentId, subagentId: handle }, registry),
           ).resolves.toEqual({ cancelled: true });
           await events.waitFor((event) => isTerminal(event) && hasTurnId(event, turnId));
           expect(events.filter((event) => isTerminal(event) && hasTurnId(event, turnId))).toEqual([
@@ -1084,7 +1087,7 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
             }),
           );
           await expect(
-            resolveCancelOmpSubagent({ agentId, subagentId: "held-child" }, registry),
+            resolveCancelOmpSubagent({ agentId, subagentId: handle }, registry),
           ).resolves.toEqual({ cancelled: false });
           await expect(resolveListOmpSubagents({ agentId }, registry)).resolves.toEqual({
             subagents: [],

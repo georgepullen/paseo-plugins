@@ -77,7 +77,7 @@ Paseo shows each OMP subagent as a read-only child of its agent. Use the **Subag
 - **Cancel** asks for confirmation, then calls OMP's `cancel_subagent`. OMP stops the subagent and its nested subagents; the parent turn continues and receives an aborted task result. Cancelling a subagent that already finished reports that and changes nothing.
 - **Steer** sends up to 16,384 characters through OMP's `steer_subagent`. The subagent receives it as its user at its next step, so slash commands and prompt templates run in the subagent. If OMP does not confirm delivery before the provider RPC timeout, the message may still arrive; check the subagent before sending it again.
 
-The control reaches only the subagents of the agent it belongs to, and only while that agent's OMP runtime is running; it never starts or resumes a runtime. Both actions need OMP 18.4.9 or newer. Turn the pill off in **OMP → Composer**.
+The control reaches only the subagents of the agent it belongs to, and only while that agent's OMP runtime is running; it never starts or resumes a runtime. OMP names subagents after their task, so the control shows those names, agent types, and descriptions after the agent's `outputRedaction` and addresses each subagent by an opaque handle rather than its OMP ID. Both actions need OMP 18.4.9 or newer. Turn the pill off in **OMP → Composer**.
 
 ## Credentials and environment
 

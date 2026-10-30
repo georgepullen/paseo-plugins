@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   ProviderConfigState,
   ProviderError,
@@ -478,7 +478,8 @@ export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls
     return snapshots.map((snapshot) => {
       const description = snapshot.description ?? snapshot.assignment;
       return {
-        id: snapshot.id,
+        id: this.subagentHandle(snapshot.id),
+        name: this.dataFilter.text(snapshot.id, 256),
         agent: this.dataFilter.text(snapshot.agent, 256),
         description: description
           ? this.dataFilter.text(description, OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH)
@@ -488,29 +489,46 @@ export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls
     });
   }
 
-  async cancelSubagent(subagentId: string): Promise<boolean> {
-    const runtime = await this.runtimeOwningLiveSubagent(subagentId);
-    return runtime ? await runtime.cancelSubagent(subagentId) : false;
+  async cancelSubagent(handle: string): Promise<boolean> {
+    const target = await this.liveSubagent(handle);
+    return target ? await target.runtime.cancelSubagent(target.nativeId) : false;
   }
 
-  async steerSubagent(subagentId: string, message: string): Promise<void> {
-    const runtime = await this.runtimeOwningLiveSubagent(subagentId);
-    if (!runtime) throw new OmpSubagentNotRunningError();
-    await runtime.steerSubagent(subagentId, message);
+  async steerSubagent(handle: string, message: string): Promise<void> {
+    const target = await this.liveSubagent(handle);
+    if (!target) throw new OmpSubagentNotRunningError();
+    await target.runtime.steerSubagent(target.nativeId, message);
   }
 
   /**
-   * The runtime whose roster lists this subagent as running, or `null`. OMP repeats the check, so
-   * this only scopes the request to this session and gives an exact "not running" answer.
+   * OMP derives subagent IDs from model-chosen task names, so clients only see this opaque,
+   * session-scoped handle and a redacted display name.
    */
-  private async runtimeOwningLiveSubagent(subagentId: string): Promise<OmpRuntimeSession | null> {
+  private subagentHandle(nativeId: string): string {
+    return createHash("sha256")
+      .update(this.id)
+      .update("\0")
+      .update(nativeId)
+      .digest("base64url")
+      .slice(0, 32);
+  }
+
+  /**
+   * The native ID and runtime of a subagent this session's current runtime lists as running, or
+   * `null`. OMP repeats the check; this scopes the request to this session and answers exactly.
+   */
+  private async liveSubagent(
+    handle: string,
+  ): Promise<{ runtime: OmpRuntimeSession; nativeId: string } | null> {
     if (this.closed || this.runtimeDead) return null;
     const runtime = this.runtime;
     const snapshots = await runtime.getSubagents();
-    const live = snapshots.some(
-      (snapshot) => snapshot.id === subagentId && isLiveOmpSubagentStatus(snapshot.status),
+    if (runtime !== this.runtime || this.closed || this.runtimeDead) return null;
+    const live = snapshots.find(
+      (snapshot) =>
+        this.subagentHandle(snapshot.id) === handle && isLiveOmpSubagentStatus(snapshot.status),
     );
-    return live && runtime === this.runtime && !this.closed && !this.runtimeDead ? runtime : null;
+    return live ? { runtime, nativeId: live.id } : null;
   }
 
   private readonly imageMaterializer = new OmpImageMaterializer();

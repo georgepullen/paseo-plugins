@@ -18,7 +18,10 @@ export const OmpSubagentStatusSchema = z.enum([
 export type OmpSubagentStatus = z.infer<typeof OmpSubagentStatusSchema>;
 
 export const OmpSubagentSchema = z.object({
+  /** Opaque handle scoped to the agent's current OMP session, never the native OMP ID. */
   id: SubagentIdSchema,
+  /** The native OMP ID for display, after the session's output redaction. */
+  name: z.string().min(1).max(256),
   agent: z.string().min(1).max(256),
   description: z.string().max(OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH).nullable(),
   status: OmpSubagentStatusSchema,
