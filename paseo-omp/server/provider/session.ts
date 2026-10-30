@@ -6,10 +6,16 @@ import type {
   ProviderInput,
   ProviderSessionConfig,
 } from "@getpaseo/plugin/server/provider";
+import {
+  isLiveOmpSubagentStatus,
+  OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH,
+  type OmpSubagent,
+} from "../../shared/subagents";
 import type {
   OmpOperationalFailure,
   OmpOperationalFailureReporter,
 } from "../operational-failure-diagnostics";
+import { type OmpSubagentControls, OmpSubagentNotRunningError } from "../subagents";
 import {
   mapOmpModels,
   nativeOmpModelId,
@@ -298,7 +304,7 @@ async function settleSessionCleanup(promises: readonly Promise<void>[]): Promise
     throw new AggregateError(failures, "OMP session initialization cleanup failed");
   }
 }
-export class OmpProviderSession implements OmpOpenedSession {
+export class OmpProviderSession implements OmpOpenedSession, OmpSubagentControls {
   readonly id: string;
   readonly cwd: string;
 
@@ -463,6 +469,48 @@ export class OmpProviderSession implements OmpOpenedSession {
   }
   setBrowserAuthorizationIssuer(issue: ((url: string) => string | undefined) | null): void {
     this.projector.setBrowserAuthorizationIssuer(issue);
+  }
+
+  /** Never starts or recovers a runtime: a dead or closed one has no running subagents. */
+  async listSubagents(): Promise<OmpSubagent[]> {
+    if (this.closed || this.runtimeDead) return [];
+    const snapshots = await this.runtime.getSubagents();
+    return snapshots.map((snapshot) => {
+      const description = snapshot.description ?? snapshot.assignment;
+      return {
+        id: snapshot.id,
+        agent: this.dataFilter.text(snapshot.agent, 256),
+        description: description
+          ? this.dataFilter.text(description, OMP_SUBAGENT_DESCRIPTION_MAX_LENGTH)
+          : null,
+        status: snapshot.status,
+      };
+    });
+  }
+
+  async cancelSubagent(subagentId: string): Promise<boolean> {
+    const runtime = await this.runtimeOwningLiveSubagent(subagentId);
+    return runtime ? await runtime.cancelSubagent(subagentId) : false;
+  }
+
+  async steerSubagent(subagentId: string, message: string): Promise<void> {
+    const runtime = await this.runtimeOwningLiveSubagent(subagentId);
+    if (!runtime) throw new OmpSubagentNotRunningError();
+    await runtime.steerSubagent(subagentId, message);
+  }
+
+  /**
+   * The runtime whose roster lists this subagent as running, or `null`. OMP repeats the check, so
+   * this only scopes the request to this session and gives an exact "not running" answer.
+   */
+  private async runtimeOwningLiveSubagent(subagentId: string): Promise<OmpRuntimeSession | null> {
+    if (this.closed || this.runtimeDead) return null;
+    const runtime = this.runtime;
+    const snapshots = await runtime.getSubagents();
+    const live = snapshots.some(
+      (snapshot) => snapshot.id === subagentId && isLiveOmpSubagentStatus(snapshot.status),
+    );
+    return live && runtime === this.runtime && !this.closed && !this.runtimeDead ? runtime : null;
   }
 
   private readonly imageMaterializer = new OmpImageMaterializer();

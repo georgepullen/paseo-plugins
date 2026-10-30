@@ -70,6 +70,15 @@ Command output, setup questions, and OAuth prompts appear in the agent timeline.
 
 Paseo's exact session `toolPolicy` preapproval grants are not equivalent to OMP's `set_host_tools` contract. The plugin cannot preserve that policy exactly, so any non-empty `toolPolicy` rejects session startup. It never converts exact grants into broader access. `disallowedTools` is separate: it controls only recognized native OMP built-ins and rejects unknown names. The **OMP → Plugin** tab shows the same boundary in its Tool access boundary card.
 
+## Subagent controls
+
+Paseo shows each OMP subagent as a read-only child of its agent. Use the **Subagents** control beside the composer on an **OMP Plugin** agent to list that agent's running subagents and act on one of them:
+
+- **Cancel** asks for confirmation, then calls OMP's `cancel_subagent`. OMP stops the subagent and its nested subagents; the parent turn continues and receives an aborted task result. Cancelling a subagent that already finished reports that and changes nothing.
+- **Steer** sends up to 16,384 characters through OMP's `steer_subagent`. The subagent receives it as its user at its next step, so slash commands and prompt templates run in the subagent. If OMP does not confirm delivery before the provider RPC timeout, the message may still arrive; check the subagent before sending it again.
+
+The control reaches only the subagents of the agent it belongs to, and only while that agent's OMP runtime is running; it never starts or resumes a runtime. Both actions need OMP 18.4.9 or newer. Turn the pill off in **OMP → Composer**.
+
 ## Credentials and environment
 
 The plugin is deny-by-default. It inherits only its fixed built-in allowlist of core provider authentication variables, exact host-wide names an operator selects in **OMP → Plugin**, and additional exact profile names under `providerOptions.inheritEnv`; it does not discover or inherit arbitrary credential-shaped names. Prefer OMP's native credential store or auth broker whenever possible.

@@ -182,8 +182,15 @@ describe("plugin server bundle", () => {
           },
           registerProvider: (provider: ProviderRegistration) => providers.push(provider),
         });
-        expect(handlers).toHaveLength(17);
+        expect(handlers).toHaveLength(20);
         expect(handlers.map(([contract]) => contract.name)).toContain("paseo-omp.list-models");
+        expect(handlers.map(([contract]) => contract.name)).toEqual(
+          expect.arrayContaining([
+            "paseo-omp.list-subagents",
+            "paseo-omp.cancel-subagent",
+            "paseo-omp.steer-subagent",
+          ]),
+        );
         expect(settings).toEqual([
           expect.objectContaining({ id: "composer-pills", scope: "host", version: 1 }),
           expect.objectContaining({ id: "provider-launch", scope: "host", version: 1 }),

@@ -22,6 +22,12 @@ import { ompModelId } from "../server/provider/catalog";
 import type { OmpModel } from "../server/provider/omp-rpc-protocol";
 import { createOmpProvider } from "../server/provider/registration";
 import { OMP_SESSION_PURPOSE_ENV } from "../server/provider/session-purpose";
+import {
+  OmpSubagentControlRegistry,
+  resolveCancelOmpSubagent,
+  resolveListOmpSubagents,
+  resolveSteerOmpSubagent,
+} from "../server/subagents";
 
 const pluginProviderModulePath = new URL(
   "../node_modules/@getpaseo/server/dist/server/server/agent/plugin-provider.js",
@@ -267,6 +273,7 @@ async function createHarness(
     stubbornDescendant?: boolean;
     /** False leaves no `omp` on PATH and no OMP_COMMAND, so only per-agent commands can launch. */
     defaultCommand?: boolean;
+    subagentControlRegistry?: OmpSubagentControlRegistry;
   } = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "paseo-omp-conformance-"));
@@ -293,6 +300,7 @@ async function createHarness(
       OMP_SESSION_DIR: sessionDir,
     },
     replayTimeoutMs: 5_000,
+    subagentControlRegistry: options.subagentControlRegistry,
   });
   const adapter = (await import(pluginProviderModulePath)) as unknown as {
     PluginAgentClientRegistry: HostRegistryConstructor;
@@ -1013,6 +1021,101 @@ describeOnPosix("OMP plugin provider conformance through PluginAgentClientRegist
       await harness.close();
     }
   });
+
+  testNoCov(
+    "cancels and steers a running child by agent while the root turn continues",
+    async () => {
+      const registry = new OmpSubagentControlRegistry();
+      const harness = await createHarness({ subagentControlRegistry: registry });
+      const agentId = "agent-with-children";
+      let session: AgentSession | undefined;
+      try {
+        session = await harness.client.createSession(
+          harness.config(),
+          harness.launchEnv({ PASEO_AGENT_ID: agentId }),
+          { persistSession: false },
+        );
+        const events = new EventLog();
+        const unsubscribe = session.subscribe((event) => events.push(event));
+        try {
+          const { turnId } = await session.startTurn("CONTRACT_SUBAGENT_HOLD", {
+            clientMessageId: "held",
+          });
+          await events.waitFor(
+            (event) =>
+              event.type === "provider_subagent" &&
+              event.event.type === "upsert" &&
+              event.event.status === "running",
+          );
+          await expect(resolveListOmpSubagents({ agentId }, registry)).resolves.toEqual({
+            subagents: [
+              { id: "held-child", agent: "worker", description: "held child", status: "running" },
+            ],
+          });
+          await expect(
+            resolveCancelOmpSubagent(
+              { agentId: "another-agent", subagentId: "held-child" },
+              registry,
+            ),
+          ).rejects.toThrow("This agent has no running OMP Plugin session");
+          await expect(
+            resolveSteerOmpSubagent(
+              { agentId, subagentId: "unlisted-child", message: "focus" },
+              registry,
+            ),
+          ).rejects.toThrow("This subagent is no longer running");
+          await expect(
+            resolveSteerOmpSubagent(
+              { agentId, subagentId: "held-child", message: "Drop the glob" },
+              registry,
+            ),
+          ).resolves.toEqual({ accepted: true });
+          await expect(
+            resolveCancelOmpSubagent({ agentId, subagentId: "held-child" }, registry),
+          ).resolves.toEqual({ cancelled: true });
+          await events.waitFor((event) => isTerminal(event) && hasTurnId(event, turnId));
+          expect(events.filter((event) => isTerminal(event) && hasTurnId(event, turnId))).toEqual([
+            expect.objectContaining({ type: "turn_completed" }),
+          ]);
+          expect(events).toContainEqual(
+            expect.objectContaining({
+              type: "provider_subagent",
+              event: expect.objectContaining({ type: "upsert", status: "canceled" }),
+            }),
+          );
+          await expect(
+            resolveCancelOmpSubagent({ agentId, subagentId: "held-child" }, registry),
+          ).resolves.toEqual({ cancelled: false });
+          await expect(resolveListOmpSubagents({ agentId }, registry)).resolves.toEqual({
+            subagents: [],
+          });
+          const commands = await loggedCommands(harness);
+          expect(commands).toContainEqual(
+            expect.objectContaining({
+              type: "steer_subagent",
+              subagentId: "held-child",
+              message: "Drop the glob",
+            }),
+          );
+          expect(commands.filter((command) => command.type === "cancel_subagent")).toEqual([
+            expect.objectContaining({ subagentId: "held-child" }),
+          ]);
+          expect(commands.some((command) => command.type === "abort")).toBe(false);
+        } finally {
+          unsubscribe();
+        }
+        await session.close();
+        session = undefined;
+        await expect(resolveListOmpSubagents({ agentId }, registry)).resolves.toEqual({
+          subagents: [],
+        });
+        expect(registry.get(agentId)).toBeUndefined();
+      } finally {
+        await session?.close();
+        await harness.close();
+      }
+    },
+  );
 
   test("steers and interrupts one active turn without duplicate terminals", async () => {
     const harness = await createHarness();

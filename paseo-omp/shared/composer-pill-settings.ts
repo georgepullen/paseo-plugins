@@ -3,6 +3,7 @@ import { z } from "zod";
 
 export const DEFAULT_COMPOSER_PILL_SETTINGS = {
   mcp: true,
+  subagents: true,
   hub: true,
   memory: true,
   sessions: true,
@@ -11,6 +12,7 @@ export const DEFAULT_COMPOSER_PILL_SETTINGS = {
 
 export const composerPillSettingsSchema = z.object({
   mcp: z.boolean().default(DEFAULT_COMPOSER_PILL_SETTINGS.mcp),
+  subagents: z.boolean().default(DEFAULT_COMPOSER_PILL_SETTINGS.subagents),
   hub: z.boolean().default(DEFAULT_COMPOSER_PILL_SETTINGS.hub),
   memory: z.boolean().default(DEFAULT_COMPOSER_PILL_SETTINGS.memory),
   sessions: z.boolean().default(DEFAULT_COMPOSER_PILL_SETTINGS.sessions),
