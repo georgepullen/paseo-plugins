@@ -88,6 +88,8 @@ const HELD_SUBAGENTS = [
 }));
 type HeldSubagent = (typeof HELD_SUBAGENTS)[number];
 const heldSubagents = new Map<string, HeldSubagent>();
+/** How long the parent keeps working after its last held child is stopped. */
+const HELD_PARENT_FINISH_DELAY_MS = 1_500;
 const typedApprovals = process.env.PASEO_OMP_FAKE_TYPED_APPROVALS !== "0";
 const logPath = process.env.PASEO_OMP_FAKE_LOG;
 const secret = process.env.PASEO_OMP_FAKE_SECRET ?? "fake-secret-not-configured";
@@ -423,7 +425,9 @@ function cancelHeldSubagent(command: Record<string, unknown>): void {
     result: { details: { results: [{ id: subagent.id, aborted: true }] } },
     isError: true,
   });
-  finish("ROOT_AFTER_CANCEL");
+  // Like OMP, stopping a child only settles its task call; the parent turn carries on.
+  send({ type: "message_end", message: assistant("ROOT_CONTINUES", "held-follow-up") });
+  setTimeout(() => finish("ROOT_AFTER_CANCEL"), HELD_PARENT_FINISH_DELAY_MS);
 }
 
 function steerHeldSubagent(command: Record<string, unknown>): void {
